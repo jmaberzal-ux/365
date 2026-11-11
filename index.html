@@ -303,6 +303,14 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
 .vig { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; border-radius: 14px; border: 1px solid var(--line); background: var(--card-2); color: var(--text); text-align: left; }
 .vig .emoji { font-size: 1.3em; }
 .fila-boton > .emoji { font-size: 1.35em; width: 1.6em; text-align: center; flex: none; }
+/* Redes */
+.numero-grande { display: flex; align-items: baseline; gap: 8px; }
+.numero-grande b { font-size: 2.4em; line-height: 1; }
+.reto-dias { display: grid; grid-template-columns: repeat(15, 1fr); gap: 4px; }
+.reto-dias .c { aspect-ratio: 1; border-radius: 4px; background: var(--card-2); border: 1px solid var(--line); }
+.reto-dias .c.limpio { background: var(--accent); border-color: var(--accent); }
+.reto-dias .c.uso { background: var(--warn); border-color: var(--warn); opacity: .75; }
+.reto-dias .c.futuro { background: transparent; }
 
 </style>
 <script>try{var t=localStorage.getItem('365.tema'),l=localStorage.getItem('365.letra');if(t)document.documentElement.dataset.tema=t;if(l)document.documentElement.dataset.letra=l;}catch(e){}</script>
@@ -320,7 +328,7 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
   };
 
   // ../365/js/db.js
-  var TABLAS = ["perfil", "fases", "habitos", "registros", "dias", "diario", "marcas", "fichajes", "eventos", "capturas", "tareas", "notas", "movimientos", "conexiones", "bancos"];
+  var TABLAS = ["perfil", "fases", "habitos", "registros", "dias", "diario", "marcas", "fichajes", "eventos", "capturas", "tareas", "notas", "movimientos", "conexiones", "bancos", "redes"];
   var cache = new Map(TABLAS.map((t) => [t, /* @__PURE__ */ new Map()]));
   var cola = /* @__PURE__ */ new Map();
   var metas = /* @__PURE__ */ new Map();
@@ -519,7 +527,7 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
   var MODO_PRUEBA = !!otro && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(otro);
   var SUPABASE_URL = MODO_PRUEBA ? otro : URL_POR_DEFECTO;
   var SUPABASE_KEY = MODO_PRUEBA ? leer("365.apikey") || "clave-de-prueba" : CLAVE_POR_DEFECTO;
-  var VERSION = "1.4.0";
+  var VERSION = "1.5.0";
 
   // ../365/js/util.js
   var pad = (n) => String(n).padStart(2, "0");
@@ -644,9 +652,10 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
     movimientos: ["fecha", "importe", "moneda", "comercio", "categoria", "etiqueta", "origen", "estado", "ext_id", "nota"],
     conexiones: ["nombre", "token_hash", "activo", "ultimo_uso"],
     // Solo lectura: la escribe la función «banco» en el servidor.
+    redes: ["app", "evento", "ts", "motivo", "origen"],
     bancos: ["aspsp", "pais", "estado", "valido_hasta", "cuentas", "saldo", "saldo_ts", "ultima_sync", "ultimo_error"]
   };
-  var OPCIONALES = /* @__PURE__ */ new Set(["bancos"]);
+  var OPCIONALES = /* @__PURE__ */ new Set(["bancos", "redes"]);
   var ahora = () => (/* @__PURE__ */ new Date()).toISOString();
   var DEFECTOS = {
     perfil: { inicio: hoy, ajustes: () => ({}) },
@@ -662,7 +671,8 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
     tareas: { titulo: () => "", hecha: () => false, origen: () => "app" },
     notas: { texto: () => "", fecha: hoy },
     movimientos: { fecha: hoy, importe: () => 0, moneda: () => "EUR", origen: () => "manual", estado: () => "confirmado" },
-    conexiones: { nombre: () => "Atajos", activo: () => true }
+    conexiones: { nombre: () => "Atajos", activo: () => true },
+    redes: { ts: ahora, origen: () => "app" }
   };
   var estado = { ultima: null, error: null, enCurso: false };
   var oyentes2 = /* @__PURE__ */ new Set();
@@ -1339,6 +1349,7 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
     apuntar: S('<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>'),
     gastos: S('<rect x="3" y="6" width="18" height="13" rx="3"/><path d="M3 10h18M16 14.5h2"/>'),
     play: S('<path d="M8 5l11 7-11 7z"/>'),
+    redes: S('<rect x="6" y="2" width="12" height="20" rx="3"/><path d="M4 4l16 16"/>'),
     candado: S('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
     ajustes: S('<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>'),
     gimnasio: S('<path d="M6.5 7v10M17.5 7v10M3.5 9.5v5M20.5 9.5v5M6.5 12h11"/>'),
@@ -3567,6 +3578,19 @@ ${txt}` : txt }));
     ];
   }
   var hay = (lista2, fn) => lista2.some(fn);
+  function pasosApp(app2) {
+    return () => [
+      `Toca ${B("Copiar dirección de al abrir")}.`,
+      `Abre ${B("Atajos")} → pestaña ${B("Automatización")} → ${B("+")} → busca ${B("App")} → elige ${B(app2)} → deja marcado solo ${B("Se abre")} → ${B("Ejecutar inmediatamente")} → ${B("Siguiente")}.`,
+      `${B("Nueva automatización en blanco")} → ${B("Añadir acción")} → ${B("Lista")}. Escribe un motivo por fila: ${B("Aburrimiento")}, ${B("Cansancio")}, ${B("Algo concreto")}, ${B("Sin darme cuenta")}, ${B("Otro")}, ${B("Mejor no la abro")}.`,
+      `Añade la acción ${B("Elegir de la lista")}.`,
+      `Añade ${B("Obtener contenido de URL")} → toca ${B("URL")}, deja el dedo → ${B("Pegar")}.`,
+      `Toca la flecha ${B("›")} de esa acción → ${B("Método")}: ${B("POST")} → ${B("Cuerpo de la solicitud")}: ${B("JSON")} → ${B("Añadir nuevo campo")} → ${B("Texto")} → clave ${B("motivo")} → en el valor elige la variable ${B("Elemento elegido")}.`,
+      `Ahora el cierre: vuelve aquí, toca ${B("Copiar dirección de al cerrar")}, y crea otra automatización ${B("App")} → ${B(app2)} → solo ${B("Se cierra")} → ${B("Ejecutar inmediatamente")} → ${B("Obtener contenido de URL")} → ${B("Pegar")}. Nada más.`,
+      `Pruébalo: abre ${app2}, elige un motivo y ciérrala. En Mi espacio › Redes saldrá la vez y el rato.`
+    ];
+  }
+  var NOTA_APP = "Cada vez que vuelvas a la app desde otra, te preguntará otra vez: esa pausa es lo que ayuda. Si eliges «Mejor no la abro», sal de la app y ese día sigue contando como día sin abrirla.";
   var PASOS = [
     {
       id: "casa",
@@ -3593,6 +3617,24 @@ ${txt}` : txt }));
         "Pruébalo: dos toques en la espalda del iPhone. En HOY saldrá «Momento de las…»."
       ],
       hecho: (c) => hay(c.marcas, (m) => m.origen === "atajo")
+    },
+    {
+      id: "redes-youtube",
+      titulo: "YouTube: al abrir y al cerrar",
+      para: "Para el reto de redes: cuándo la abres, por qué y cuánto rato. Te pregunta el motivo antes de entrar.",
+      urls: [["al abrir", "tipo=app&app=youtube&evento=abrir"], ["al cerrar", "tipo=app&app=youtube&evento=cerrar"]],
+      pasos: pasosApp("YouTube"),
+      nota: NOTA_APP,
+      hecho: (c) => hay(c.redes, (x) => x.app === "youtube" && x.origen === "atajo")
+    },
+    {
+      id: "redes-instagram",
+      titulo: "Instagram: al abrir y al cerrar",
+      para: "Solo si vuelves a tenerla instalada. Igual que el de YouTube.",
+      urls: [["al abrir", "tipo=app&app=instagram&evento=abrir"], ["al cerrar", "tipo=app&app=instagram&evento=cerrar"]],
+      pasos: pasosApp("Instagram"),
+      nota: NOTA_APP,
+      hecho: (c) => hay(c.redes, (x) => x.app === "instagram" && x.origen === "atajo")
     },
     {
       id: "casa-salir",
@@ -3687,7 +3729,7 @@ ${txt}` : txt }));
   }
   var direccion = (k, q) => `${urlIngest()}?llave=${k.token}${q ? `&${q}` : ""}`;
   function datos() {
-    return { fichajes: todas2("fichajes"), marcas: todas2("marcas"), capturas: todas2("capturas"), movimientos: todas2("movimientos"), eventos: todas2("eventos") };
+    return { fichajes: todas2("fichajes"), marcas: todas2("marcas"), capturas: todas2("capturas"), movimientos: todas2("movimientos"), eventos: todas2("eventos"), redes: todas2("redes") };
   }
   async function crearLlave() {
     const n = todas2("conexiones").length;
@@ -4081,10 +4123,199 @@ ${txt}` : txt }));
     else pintarIndice(el2);
   }
 
+  // ../365/js/redes.js
+  var APPS = { instagram: "Instagram", youtube: "YouTube" };
+  var MOTIVOS = ["Aburrimiento", "Cansancio", "Algo concreto", "Sin darme cuenta", "Otro"];
+  var DIAS_RETO = 30;
+  var desistio = (e) => /mejor no/i.test(String(e && e.motivo || ""));
+  var diasEntre2 = (a, b) => Math.round((Date.parse(`${b}T12:00:00Z`) - Date.parse(`${a}T12:00:00Z`)) / 864e5);
+  function usos(eventos, app2) {
+    const ev = (eventos || []).filter((e) => e && !e.deleted && e.app === app2).sort((a, b) => tsMs(a.ts) - tsMs(b.ts));
+    const lista2 = [];
+    let abierto = null;
+    for (const e of ev) {
+      if (e.evento === "abrir") {
+        abierto = { inicio: e.ts, fin: null, minutos: null, motivo: e.motivo || null, fecha: fechaDeTs(e.ts), desistido: desistio(e), id: e.id };
+        lista2.push(abierto);
+      } else if (e.evento === "cerrar" && abierto && !abierto.fin) {
+        const min = (tsMs(e.ts) - tsMs(abierto.inicio)) / 6e4;
+        if (min >= 0 && min <= 180) {
+          abierto.fin = e.ts;
+          abierto.minutos = Math.max(1, Math.round(min));
+        }
+        abierto = null;
+      }
+    }
+    return lista2.reverse();
+  }
+  function reto(cfg, eventos, app2, hoyF) {
+    const inicio = cfg && cfg.inicio;
+    const u = usos(eventos, app2).filter((x) => !x.desistido);
+    const ultima = u[0] || null;
+    if (!inicio) return { activo: false, ultima, usos: u };
+    const fin = sumarDias(inicio, DIAS_RETO - 1);
+    const hasta = hoyF < fin ? hoyF : fin;
+    const dia = Math.max(0, Math.min(DIAS_RETO, diasEntre2(inicio, hasta) + 1));
+    const conUso = new Set(u.filter((x) => x.fecha >= inicio && x.fecha <= hasta).map((x) => x.fecha));
+    const enReto = u.filter((x) => x.fecha >= inicio && x.fecha <= fin);
+    return {
+      activo: true,
+      inicio,
+      fin,
+      dia,
+      diasCon: conUso.size,
+      diasSin: Math.max(0, dia - conUso.size),
+      terminado: hoyF > fin,
+      minutos: enReto.reduce((a, x) => a + (x.minutos || 0), 0),
+      veces: enReto.length,
+      desistidas: usos(eventos, app2).filter((x) => x.desistido && x.fecha >= inicio && x.fecha <= fin).length,
+      ultima,
+      usos: u
+    };
+  }
+  function motivosDe(lista2) {
+    const n = /* @__PURE__ */ new Map();
+    for (const x of lista2) {
+      const k = x.motivo || "Sin motivo";
+      n.set(k, (n.get(k) || 0) + 1);
+    }
+    return [...n.entries()].sort((a, b) => b[1] - a[1]);
+  }
+
+  // ../365/js/vistas/redes.js
+  var atras = `<a class="enlace" href="#/espacio">${icono("atras")} Mi espacio</a>`;
+  var DECISIONES = { sin: "Sigo sin ella", limite: "La uso con límite", vuelvo: "Vuelvo a usarla" };
+  var cfgDe = (app2) => (ajustes().redes || {})[app2] || {};
+  function guardarCfg(app2, cambios) {
+    const r = ajustes().redes || {};
+    guardarAjustes({ redes: { ...r, [app2]: { ...r[app2] || {}, ...cambios } } });
+  }
+  function cambiarInicio(app2) {
+    const actual = cfgDe(app2).inicio || hoy();
+    abrirHoja(`<h2>${esc(APPS[app2])}: ¿desde qué día?</h2>
+    <form class="col" data-inicio><label class="campo">Día en que la dejaste<input type="date" name="fecha" value="${esc(actual)}" max="${hoy()}" required></label>
+    <button class="boton principal ancho" type="submit">Guardar</button></form>`, (c, cerrar) => {
+      const f = c.querySelector("[data-inicio]");
+      f.onsubmit = (e) => {
+        e.preventDefault();
+        if (!f.fecha.value) return;
+        guardarCfg(app2, { inicio: f.fecha.value, decision: null });
+        cerrar();
+        aviso("Guardado");
+      };
+    });
+  }
+  function apuntarAMano(app2) {
+    const st = { motivo: null };
+    abrirHoja(`<h2>La he abierto: ${esc(APPS[app2])}</h2>
+    <span class="etiqueta">¿Por qué?</span>
+    <div class="chips">${MOTIVOS.map((m) => `<button type="button" class="chip" data-mot="${esc(m)}">${esc(m)}</button>`).join("")}</div>
+    <label class="campo">Cuánto rato (minutos, opcional)<input type="text" inputmode="numeric" name="min" placeholder="15"></label>
+    <button class="boton principal ancho" data-ok>Apuntar</button>
+    <p class="muted pequeno">Solo cuenta ese día. Lo que llevas no se pierde.</p>`, (c, cerrar) => {
+      c.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-mot]");
+        if (b) {
+          st.motivo = b.dataset.mot;
+          c.querySelectorAll("[data-mot]").forEach((x) => x.classList.toggle("activo", x === b));
+          return;
+        }
+        if (!e.target.closest("[data-ok]")) return;
+        const min = Number(String(c.querySelector("[name=min]").value).replace(",", "."));
+        const ts = (/* @__PURE__ */ new Date()).toISOString();
+        guardar("redes", { id: uuid(), app: app2, evento: "abrir", ts: min > 0 ? new Date(Date.now() - min * 6e4).toISOString() : ts, motivo: st.motivo, origen: "app" });
+        if (min > 0) guardar("redes", { id: uuid(), app: app2, evento: "cerrar", ts, motivo: null, origen: "app" });
+        cerrar();
+        aviso("Apuntado, sin drama");
+      });
+    });
+  }
+  function tarjetaApp(app2, ev, f) {
+    const cfg = cfgDe(app2);
+    const r = reto(cfg, ev, app2, f);
+    const nombre = APPS[app2];
+    if (!r.activo) {
+      return `<section class="tarjeta col"><h2>${esc(nombre)}</h2><p class="muted">Aún sin empezar el reto.</p>
+      <button class="boton principal" data-empezar="${app2}">Empezar hoy</button><button class="enlace" data-inicio="${app2}">Ya la dejé otro día</button></section>`;
+    }
+    const usados = new Set(r.usos.map((x) => x.fecha));
+    const celdas = Array.from({ length: DIAS_RETO }, (_, i) => {
+      const d = /* @__PURE__ */ new Date(`${r.inicio}T12:00:00`);
+      d.setDate(d.getDate() + i);
+      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const cls = iso > f ? "futuro" : usados.has(iso) ? "uso" : "limpio";
+      return `<span class="c ${cls}" title="${esc(fechaCorta(iso))}"></span>`;
+    }).join("");
+    const u = r.ultima;
+    const decision = r.terminado ? cfg.decision ? `<p>Decidiste: <b>${esc(DECISIONES[cfg.decision] || cfg.decision)}</b>.</p><button class="enlace" data-otra-vez="${app2}">Empezar otros 30 días</button>` : `<div class="tarjeta destacada col"><span class="etiqueta">Se acabaron los 30 días</span><p>¿Y ahora qué haces con ${esc(nombre)}?</p>
+      <div class="botones">${Object.entries(DECISIONES).map(([k, t]) => `<button class="boton" data-decidir="${app2}" data-dec="${k}">${t}</button>`).join("")}</div></div>` : "";
+    return `<section class="tarjeta col" data-app="${app2}">
+    <div class="fila entre"><h2>${esc(nombre)}</h2><span class="insignia">día ${r.dia} de ${DIAS_RETO}</span></div>
+    <div class="numero-grande"><b data-dias-sin>${r.diasSin}</b> <span>${r.diasSin === 1 ? "día" : "días"} sin abrirla</span></div>
+    <div class="reto-dias" aria-hidden="true">${celdas}</div>
+    <p class="muted pequeno">${r.diasCon ? `La abriste ${r.diasCon} ${r.diasCon === 1 ? "día" : "días"}${r.minutos ? ` · ${minutosTexto(r.minutos)} en total` : ""}.` : "Ni un día abierta."}${r.desistidas ? ` Y ${r.desistidas === 1 ? "una vez" : `${r.desistidas} veces`} decidiste no abrirla.` : ""}</p>
+    ${u ? `<p class="pequeno">Última vez: ${esc(fechaCorta(u.fecha))} a las ${esc(horaMin(u.inicio))}${u.minutos ? `, ${minutosTexto(u.minutos)}` : ""}${u.motivo ? ` · ${esc(u.motivo)}` : ""}</p>` : ""}
+    ${decision}
+    <div class="botones"><button class="boton" data-mano="${app2}">La he abierto</button><button class="enlace" data-inicio="${app2}">Cambiar el día de inicio</button></div>
+  </section>`;
+  }
+  function pintarRedes(el2) {
+    if (meta("ausente:redes")) olvidarAusencia("redes");
+    const f = hoy();
+    const ev = todas2("redes").filter((e) => Number.isFinite(tsMs(e.ts)));
+    const abiertas = ev.filter((e) => e.evento === "abrir" && !desistio(e));
+    const todos = [...usos(ev, "instagram"), ...usos(ev, "youtube")].filter((x) => !x.desistido);
+    const motivos = motivosDe(todos);
+    const g = rejillaGanas(abiertas);
+    const maxG = Math.max(1, ...g.flat());
+    const nivel2 = (n) => !n ? "" : n <= maxG / 3 ? "n1" : n <= 2 * maxG / 3 ? "n2" : "n3";
+    const recientes = [...ev].filter((e) => e.evento === "abrir").sort((a, b) => String(b.ts).localeCompare(String(a.ts))).slice(0, 12);
+    const sinAtajo = !ev.some((e) => e.origen === "atajo");
+    el2.innerHTML = `<div class="pantalla">${atras}
+    <header class="cabecera"><h1>Redes</h1><p class="muted">30 días sin Instagram ni YouTube. Si un día la abres, solo cuenta ese día: lo que llevas no se pierde.</p></header>
+    ${Object.keys(APPS).map((a) => tarjetaApp(a, ev, f)).join("")}
+    ${motivos.length ? `<section class="tarjeta col"><h2>Por qué la abres</h2>${motivos.slice(0, 6).map(([k, n]) => `<div class="fila entre"><span>${esc(k)}</span><b>${n}</b></div>`).join("")}</section>` : ""}
+    ${abiertas.length ? `<section class="tarjeta col"><h2>Cuándo pasa</h2>
+      <div class="rejilla-ganas"><span></span>${DIAS_CORTOS.map((d) => `<b>${d}</b>`).join("")}${["Madrugada", "Mañana", "Tarde", "Noche"].map((fr, i) => `<span class="muted">${fr}</span>${g[i].map((n) => `<span class="c ${nivel2(n)}" title="${n}"></span>`).join("")}`).join("")}</div></section>` : ""}
+    ${recientes.length ? `<section class="tarjeta col"><h2>Últimas veces</h2>${recientes.map((e) => {
+      const s = usos(ev, e.app).find((x) => x.id === e.id) || {};
+      return `<div class="fila entre"><span>${esc(APPS[e.app] || e.app)} · ${esc(fechaCorta(s.fecha || f))} ${esc(horaMin(e.ts))}</span><span class="muted pequeno">${esc([s.minutos ? minutosTexto(s.minutos) : "", e.motivo || ""].filter(Boolean).join(" · "))}</span></div>`;
+    }).join("")}</section>` : ""}
+    <a class="boton ancho ${sinAtajo ? "principal" : ""}" href="#/espacio/ajustes/atajos/redes-youtube">${icono("ajustes")} ${sinAtajo ? "Montar el atajo de YouTube" : "Atajos de las apps"}</a>
+  </div>`;
+    el2.onclick = (e) => {
+      const t = (sel) => e.target.closest(sel);
+      let b;
+      if (b = t("[data-empezar]")) {
+        guardarCfg(b.dataset.empezar, { inicio: f, decision: null });
+        aviso("Empieza hoy");
+        return;
+      }
+      if (b = t("[data-inicio]")) {
+        cambiarInicio(b.dataset.inicio);
+        return;
+      }
+      if (b = t("[data-mano]")) {
+        apuntarAMano(b.dataset.mano);
+        return;
+      }
+      if (b = t("[data-decidir]")) {
+        guardarCfg(b.dataset.decidir, { decision: b.dataset.dec });
+        aviso("Decidido. Lo puedes cambiar cuando quieras.");
+        return;
+      }
+      if (b = t("[data-otra-vez]")) {
+        guardarCfg(b.dataset.otraVez, { inicio: f, decision: null });
+        aviso("Otros 30 días desde hoy");
+      }
+    };
+  }
+
   // ../365/js/vistas/espacio.js
   var MODULOS = [
     { id: "ganas", nombre: "Ganas", sub: "Privado", icono: "ganas" },
     { id: "finanzas", nombre: "Dinero", sub: "Gastos y revisión", icono: "gastos" },
+    { id: "redes", nombre: "Redes", sub: "30 días sin", icono: "redes" },
     { id: "gimnasio", nombre: "Gimnasio", sub: "Se apunta solo", icono: "gimnasio" },
     { id: "lectura", nombre: "Lectura", sub: "Con temporizador", icono: "lectura" },
     { id: "escritura", nombre: "Escritura", sub: "Diario libre", icono: "escribir" },
@@ -4096,7 +4327,7 @@ ${txt}` : txt }));
     { id: "tabaco", nombre: "Tabaco", sub: "Cuando decidas", icono: "respirar" },
     { id: "armario", nombre: "Armario", sub: "Llega en la fase 2", icono: "armario", off: true }
   ];
-  var atras = `<a class="enlace" href="#/espacio">${icono("atras")} Mi espacio</a>`;
+  var atras2 = `<a class="enlace" href="#/espacio">${icono("atras")} Mi espacio</a>`;
   var { ETIQUETAS: ETIQUETAS2 } = categorias_exports;
   var saltados = /* @__PURE__ */ new Set();
   function pintarInicio3(el2) {
@@ -4511,7 +4742,7 @@ ${txt}` : txt }));
     const gastosMes = movs.filter((m) => String(m.fecha).startsWith(mes) && Number(m.importe) < 0);
     const r = resumenMes(movs, aj, mes, cat);
     const vigiladas = VIGILADAS.map((id) => ({ k: porId(cat, id), t: (r.porCategoria.find((x) => x.cat.id === id) || { total: 0 }).total }));
-    el2.innerHTML = `<div class="pantalla">${atras}
+    el2.innerHTML = `<div class="pantalla">${atras2}
     <header class="cabecera"><h1>Dinero</h1><p class="muted">${todas2("bancos").some((b) => b.estado === "activo") ? "Los movimientos del banco entran solos cada día." : "Mientras el banco no esté conectado, cuenta lo que apuntes."}</p></header>
     ${g0 ? `<section class="tarjeta destacada col" data-revisar="${esc(g0.clave)}">
       <span class="etiqueta">¿En qué es esto? · ${pend.length === 1 ? "queda 1" : `quedan ${pend.length}`}</span>
@@ -4614,7 +4845,7 @@ ${txt}` : txt }));
     const hoyF = hoy();
     const hoyVisita = gym && vs.find((v) => v.fecha === hoyF);
     const tieneHabito = todas2("habitos").some((h) => h.auto === "gimnasio" && h.estado !== "finalizado");
-    el2.innerHTML = `<div class="pantalla">${atras}
+    el2.innerHTML = `<div class="pantalla">${atras2}
     <header class="cabecera"><h1>${gym ? "Gimnasio" : "Familia"}</h1>
       <p class="muted">${gym ? "Se apunta solo al llegar y al salir. Día de dolor: versión suave o descanso, sin penalizar." : "Visitas a casa de tu madre, apuntadas solas. Sin horas ni puntuación."}</p></header>
     ${hoyVisita ? `<section class="tarjeta destacada col"><span class="etiqueta">Hoy</span><p>¿Qué tal ha ido?</p>
@@ -4638,7 +4869,7 @@ ${txt}` : txt }));
     const ids = new Set(habs.map((h) => h.id));
     const regs = todas2("registros").filter((r) => ids.has(r.habito_id) && cuentaComoHecho(r)).sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
     const total = regs.reduce((a, r) => a + (Number(r.minutos) || 0), 0);
-    el2.innerHTML = `<div class="pantalla">${atras}
+    el2.innerHTML = `<div class="pantalla">${atras2}
     <header class="cabecera"><h1>Lectura</h1><p class="muted">Diez minutos con temporizador. Cómics primero, si apetece.</p></header>
     ${activo ? `<button class="boton principal ancho" data-accion="leer">${icono("play")} Leer ${minutosTexto(activo.duracion_min || 10)}</button>` : `<section class="tarjeta suave col"><p>Aún no hay hábito de lectura. Es la fase siguiente que te propuse.</p><button class="boton" data-accion="crear">Crear hábito de lectura</button></section>`}
     <section class="tarjeta col"><div class="fila entre"><span>Lectura acumulada</span><b>${total ? minutosTexto(total) : "0"}</b></div>
@@ -4659,7 +4890,7 @@ ${txt}` : txt }));
       if (!semanas.has(k)) semanas.set(k, []);
       semanas.get(k).push(n);
     }
-    el2.innerHTML = `<div class="pantalla">${atras}
+    el2.innerHTML = `<div class="pantalla">${atras2}
     <header class="cabecera"><h1>Orden de casa</h1><p class="muted">Un cajón o un armario por semana. Limpieza el fin de semana.</p></header>
     <section class="tarjeta col"><span class="etiqueta">Esta semana</span>
       ${(semanas.get(lunes) || []).map((n) => `<p>${esc(n.texto)}</p>`).join("") || '<p class="muted">Nada apuntado todavía.</p>'}
@@ -4706,7 +4937,7 @@ ${txt}` : txt }));
     const notas = todas2("notas").filter((n) => !n.area).sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)) || String(b.updated_at).localeCompare(String(a.updated_at)));
     const filaT = (t) => `<div class="habito"><button class="check ${t.hecha ? "hecho" : ""}" data-check="${esc(t.id)}" aria-label="${t.hecha ? "Desmarcar" : "Hecha"}: ${esc(t.titulo)}">${t.hecha ? icono("check") : ""}</button>
     <button class="info texto-boton" data-tarea="${esc(t.id)}"><span class="nombre">${esc(t.titulo)}</span>${t.fecha && t.fecha !== f ? `<br><span class="detalle">${esc(fechaCorta(t.fecha))}</span>` : ""}</button></div>`;
-    el2.innerHTML = `<div class="pantalla">${atras}
+    el2.innerHTML = `<div class="pantalla">${atras2}
     <header class="cabecera fila entre"><h1>Apuntes</h1><button class="boton peq principal" data-accion="apuntar">${icono("mas")} Apuntar</button></header>
     <p class="muted pequeno">Lo de días pasados no se acumula: pasa a «Sin fecha», sin avisos.</p>
     ${grupos.map(([t, l]) => l.length ? `<section class="tarjeta"><span class="etiqueta">${t}</span><div class="lista">${l.map(filaT).join("")}</div></section>` : "").join("")}
@@ -4748,7 +4979,7 @@ ${txt}` : txt }));
   function pintarCuandoDecidas(el2, tipo) {
     const t = CUANDO[tipo];
     const ya = todas2("habitos").find((h) => h.estado !== "finalizado" && mismoNombre(h.nombre, t.plantilla.nombre));
-    el2.innerHTML = `<div class="pantalla">${atras}
+    el2.innerHTML = `<div class="pantalla">${atras2}
     <header class="cabecera"><h1>${t.titulo}</h1><p>${t.texto}</p></header>
     ${ya ? `<a class="boton principal ancho" href="#/habitos/${encodeURIComponent(ya.id)}">Ya lo empezaste: ver «${esc(ya.nombre)}»${ya.estado === "pausado" ? " (en pausa)" : ""}</a>` : `<button class="boton principal ancho" data-accion="empezar">Quiero empezar</button>
     <p class="muted pequeno">Se crea un hábito con versión mínima. Lo ajustas tú antes de guardarlo.</p>`}
@@ -4767,6 +4998,7 @@ ${txt}` : txt }));
     else if (m === "relacion") pintarRelacion(el2);
     else if (m === "ajustes") pintar4(el2, partes.slice(1));
     else if (m === "finanzas") pintarFinanzas(el2);
+    else if (m === "redes") pintarRedes(el2);
     else if (m === "gimnasio") pintarVisitas(el2, "gimnasio");
     else if (m === "familia") pintarVisitas(el2, "madre");
     else if (m === "lectura") pintarLectura(el2);
