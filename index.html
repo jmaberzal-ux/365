@@ -293,6 +293,16 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
 .habito .check b { font-size: .95em; color: var(--muted); }
 .error a { color: var(--accent); }
 .progreso.pasado > span { background: var(--warn); }
+/* Categorías de gasto */
+.rejilla-cat { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.cat { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 72px; padding: 8px 4px; border-radius: 14px; border: 1px solid var(--line); background: var(--card); color: var(--text); font-size: .8em; line-height: 1.15; text-align: center; }
+.cat .emoji { font-size: 1.6em; line-height: 1; }
+.cat.activo { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.cat.nueva { border-style: dashed; color: var(--muted); }
+.vigiladas { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.vig { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; border-radius: 14px; border: 1px solid var(--line); background: var(--card-2); color: var(--text); text-align: left; }
+.vig .emoji { font-size: 1.3em; }
+.fila-boton > .emoji { font-size: 1.35em; width: 1.6em; text-align: center; flex: none; }
 
 </style>
 <script>try{var t=localStorage.getItem('365.tema'),l=localStorage.getItem('365.letra');if(t)document.documentElement.dataset.tema=t;if(l)document.documentElement.dataset.letra=l;}catch(e){}</script>
@@ -509,7 +519,7 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
   var MODO_PRUEBA = !!otro && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(otro);
   var SUPABASE_URL = MODO_PRUEBA ? otro : URL_POR_DEFECTO;
   var SUPABASE_KEY = MODO_PRUEBA ? leer("365.apikey") || "clave-de-prueba" : CLAVE_POR_DEFECTO;
-  var VERSION = "1.3.0";
+  var VERSION = "1.4.0";
 
   // ../365/js/util.js
   var pad = (n) => String(n).padStart(2, "0");
@@ -1259,8 +1269,8 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
     const recientes = marcas.filter((m) => !m.deleted && m.abierta && ahoraMs - tsMs(m.ts) < 12 * 36e5).sort((a, b) => tsMs(b.ts) - tsMs(a.ts));
     const sinCompletar = recientes.find((m) => !m.cifrado);
     if (sinCompletar) return { tipo: "marca", marca: sinCompletar, titulo: `Momento de las ${horaMin(sinCompletar.ts)}`, detalle: "Apuntado desde el atajo. Complétalo en cinco segundos." };
-    const seguir = recientes.find((m) => m.cifrado && !m.cierre && ahoraMs - tsMs(m.ts) >= umbralSeguimientoMs);
-    if (seguir) return { tipo: "seguimiento", marca: seguir, titulo: "¿Cómo van?", detalle: `Desde las ${horaMin(seguir.ts)}. Un toque y listo.` };
+    const seguir2 = recientes.find((m) => m.cifrado && !m.cierre && ahoraMs - tsMs(m.ts) >= umbralSeguimientoMs);
+    if (seguir2) return { tipo: "seguimiento", marca: seguir2, titulo: "¿Cómo van?", detalle: `Desde las ${horaMin(seguir2.ts)}. Un toque y listo.` };
     if (tarde && tarde.pendiente) return { tipo: "tarde", titulo: "¿Arrancas la tarde?", detalle: "Con 2 minutos basta para empezar. Descansar también vale, si lo eliges." };
     const delDia = habitosDelDia(habitos, fecha).filter((h) => h.cuenta !== false);
     const pendientes2 = delDia.filter((h) => !indice.get(`${h.id}|${fecha}`));
@@ -1618,6 +1628,28 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
       resumen: `Gasto de ${euros(n)} · ${concepto}${efectivo ? " · efectivo" : ""}`
     };
   }
+  function gastoCorto(original, hoyF, esConcepto) {
+    if (typeof esConcepto !== "function") return null;
+    const s = original.trim().replace(/[.!]+$/, "");
+    const num = "(\\d+(?:[.,]\\d{1,2})?)";
+    let m = s.match(new RegExp(`^([^\\d]+?)\\s+${num}\\s*(?:€|euros?)?$`, "i"));
+    let concepto = m && m[1];
+    let cifra = m && m[2];
+    if (!m) {
+      m = s.match(new RegExp(`^${num}\\s*(?:€|euros?)?\\s+(?:de\\s+|en\\s+)?([^\\d]+)$`, "i"));
+      concepto = m && m[2];
+      cifra = m && m[1];
+    }
+    if (!m) return null;
+    concepto = capital(concepto.trim()).slice(0, 80);
+    const n = Number(String(cifra).replace(",", "."));
+    if (!concepto || !(n > 0) || n > 1e5 || !esConcepto(concepto)) return null;
+    return {
+      tipo: "gasto",
+      datos: { importe: -n, comercio: concepto, origen: "voz", estado: "provisional", fecha: hoyF },
+      resumen: `Gasto de ${euros(n)} · ${concepto}`
+    };
+  }
   function tarea(t, original, hoyF) {
     const m = original.match(/^\s*(tarea|recordar|recuerdame|recuérdame|tengo que|hay que|pendiente|no olvidar|no olvides)\b[:,]?\s*(.*)$/i);
     const fecha = fechaDe(t, hoyF);
@@ -1687,14 +1719,193 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
       resumen: `${entra ? "Ingreso" : "Gasto"} de ${euros(importe2)} · ${bonito}`
     };
   }
-  function interpretar(texto, { habitos = [], hoy: hoyF } = {}) {
+  function interpretar(texto, { habitos = [], hoy: hoyF, esConceptoGasto = null } = {}) {
     const original = String(texto || "").trim();
     const t = normalizar(original);
     if (!t) return { tipo: "vacio", resumen: "" };
     if (/^(tengo |me han entrado |me entran |me estan entrando )?ganas( de consumir| ahora| ya)?[.!]?$/.test(t)) return { tipo: "ganas", resumen: "Momento apuntado" };
     const nota = original.match(/^\s*(nota|apunta|apuntar|idea)\b[:,]?\s*(.+)$/i);
     if (nota) return { tipo: "nota", datos: { texto: capital(nota[2].trim()) }, resumen: `Nota: ${capital(nota[2].trim()).slice(0, 60)}` };
-    return gasto(t, original, hoyF) || habitoHecho(t, habitos) || tarea(t, original, hoyF) || { tipo: "nota", datos: { texto: capital(original) }, resumen: `Nota: ${capital(original).slice(0, 60)}` };
+    return gasto(t, original, hoyF) || gastoCorto(original, hoyF, esConceptoGasto) || habitoHecho(t, habitos) || tarea(t, original, hoyF) || { tipo: "nota", datos: { texto: capital(original) }, resumen: `Nota: ${capital(original).slice(0, 60)}` };
+  }
+
+  // ../365/js/categorias.js
+  var categorias_exports = {};
+  __export(categorias_exports, {
+    EMOJI_PROPIA: () => EMOJI_PROPIA,
+    ETIQUETAS: () => ETIQUETAS,
+    SERIE: () => SERIE,
+    VIGILADAS: () => VIGILADAS,
+    cambiarCategoria: () => cambiarCategoria,
+    catalogo: () => catalogo,
+    categoriaDe: () => categoriaDe,
+    conceptoConocido: () => conceptoConocido,
+    crearPropia: () => crearPropia,
+    etiquetaDe: () => etiquetaDe,
+    juntar: () => juntar,
+    ordenParaElegir: () => ordenParaElegir,
+    parecida: () => parecida,
+    porId: () => porId,
+    porRevisar: () => porRevisar,
+    resumenMes: () => resumenMes
+  });
+  var ETIQUETAS = { necesario: "Necesario", capricho: "Capricho", basura: "Basura o dulces" };
+  var SERIE = [
+    { id: "gasolina", nombre: "Gasolina", emoji: "⛽", etiqueta: "necesario", claves: ["repsol", "cepsa", "moeve", "bp\\b", "galp", "shell", "petronor", "gasolinera", "gasolina", "carburante", "combustible", "ballenoil", "plenoil", "petroprix", "esclatoil", "avia\\b", "disa\\b", "campsa", "eess\\b", "e\\.s\\."] },
+    { id: "tabaco", nombre: "Tabaco", emoji: "🚬", etiqueta: "capricho", claves: ["estanc", "tabac", "expendedur", "cigarr", "logista"] },
+    { id: "super", nombre: "Súper", emoji: "🛒", etiqueta: "necesario", claves: ["mercadona", "lidl", "carrefour", "dia\\b", "supermercado", "supermerc", "alcampo", "ahorramas", "eroski", "aldi", "hipercor", "supercor", "consum\\b", "simply\\b", "spar\\b", "condis", "coviran", "bonpreu", "caprabo", "froiz", "gadis", "family cash", "bm super", "alimentacion", "ultramarinos", "fruteria", "carniceria", "pescaderia", "panaderia", "horno de pan", "mercado\\b"] },
+    { id: "bares", nombre: "Bares y cafés", emoji: "☕", etiqueta: "capricho", claves: ["bar\\b", "cafe", "cafeteria", "restaurante", "rest\\.", "meson", "taberna", "cerveceria", "tasca\\b", "bodega", "asador", "pizzeria", "burger", "mcdonald", "mc donald", "telepizza", "kfc", "starbucks", "vips", "foster", "goiko", "100 montaditos", "rodilla", "churreria", "kebab", "sushi", "brasa", "uber ?eats", "just ?eat", "deliveroo"] },
+    { id: "dulces", nombre: "Dulces y Glovo", emoji: "🍩", etiqueta: "basura", claves: ["glovo", "pasteler", "bolleri", "bollo", "confiter", "heladeri", "chuche", "golosin", "dunkin", "donut", "dulce", "caramelo"] },
+    { id: "ropa", nombre: "Ropa y Vinted", emoji: "👕", etiqueta: "capricho", claves: ["vinted", "zara", "primark", "h&m", "h & m", "pull&bear", "pull & bear", "bershka", "stradivarius", "mango\\b", "springfield", "massimo dutti", "kiabi", "shein", "zalando", "jack ?& ?jones", "celio\\b", "lefties", "decimas", "foot ?locker", "jd sports", "nike\\b", "adidas", "new balance", "levi\\b", "ropa\\b", "zapater"] },
+    { id: "casa", nombre: "Casa y facturas", emoji: "🏠", etiqueta: "necesario", claves: ["endesa", "iberdrola", "naturgy", "holaluz", "totalenergies", "octopus", "canal de isabel", "movistar", "telefonica", "vodafone", "orange\\b", "digi\\b", "yoigo", "jazztel", "pepephone", "masmovil", "lowi", "simyo", "netflix", "spotify", "hbo\\b", "disney", "prime video", "amazon prime", "dazn", "icloud", "apple\\.com", "google one", "youtube premium", "claude", "anthropic", "chatgpt", "openai", "leroy merlin", "bricomart", "bricodepot", "bauhaus", "brico", "ferreter", "ikea", "comunidad de propietarios", "mapfre", "mutua", "allianz", "axa\\b", "linea directa", "generali", "zurich"] },
+    { id: "comunes", nombre: "Gastos comunes", emoji: "👫", etiqueta: "necesario", claves: [] },
+    { id: "coche", nombre: "Coche", emoji: "🚗", etiqueta: "necesario", claves: ["parking", "aparcamiento", "empark", "saba\\b", "telpark", "elparking", "easypark", "peaje", "autopista", "via ?t\\b", "itv\\b", "taller\\b", "neumatic", "norauto", "midas", "feu vert", "lavadero", "car ?wash", "recambio"] },
+    { id: "salud", nombre: "Salud", emoji: "💊", etiqueta: "necesario", claves: ["farmac", "parafarmac", "clinica", "dentist", "dental", "hospital", "medic", "optica", "fisio", "sanitas", "adeslas", "dkv\\b", "asisa", "quiron", "vithas", "laboratorio"] },
+    { id: "varios", nombre: "Varios", emoji: "📦", etiqueta: null, claves: [] }
+  ];
+  var VIGILADAS = ["ropa", "dulces"];
+  var EMOJI_PROPIA = "🏷️";
+  var cacheRe = /* @__PURE__ */ new Map();
+  function casa(texto, patron) {
+    if (!texto || !patron) return false;
+    let re = cacheRe.get(patron);
+    if (!re) {
+      re = new RegExp(`(^|[^a-z0-9])${patron}`);
+      cacheRe.set(patron, re);
+    }
+    return re.test(texto);
+  }
+  var escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  function casaNombre(texto, nombre) {
+    const n = normalizar(nombre);
+    if (!n || n.length < 3) return false;
+    const base = escRe(n.replace(/s$/, ""));
+    return new RegExp(`(^|[^a-z0-9])${base}s?($|[^a-z0-9])`).test(texto);
+  }
+  function catalogo(aj = {}) {
+    const cfg = aj.cats || {};
+    const cambios = cfg.cambios || {};
+    const serie = SERIE.map((c) => ({ ...c, ...cambios[c.id] || {}, serie: true }));
+    const propias = (cfg.propias || []).filter((c) => c && c.id && c.nombre).map((c) => ({ emoji: EMOJI_PROPIA, etiqueta: null, ...c, claves: [], serie: false }));
+    return [...serie, ...propias];
+  }
+  function porId(cat, id) {
+    return cat.find((c) => c.id === id) || cat.find((c) => c.id === "varios");
+  }
+  function seguir(cat, c) {
+    let x = c;
+    for (let i = 0; i < 5 && x && x.juntadaCon; i++) x = porId(cat, x.juntadaCon);
+    return x;
+  }
+  function categoriaDe(m, aj = {}, cat = catalogo(aj)) {
+    if (!m || Number(m.importe) >= 0) return { cat: null, fuente: "ingreso" };
+    if (m.categoria && cat.some((c) => c.id === m.categoria)) return { cat: seguir(cat, porId(cat, m.categoria)), fuente: "mov" };
+    const k = normalizar(m.comercio);
+    const r = (aj.reglasCat || {})[k];
+    if (r && cat.some((c) => c.id === r)) return { cat: seguir(cat, porId(cat, r)), fuente: "regla" };
+    for (const c of cat) if (c.id !== "varios" && casaNombre(k, c.nombre)) return { cat: seguir(cat, c), fuente: "clave" };
+    const textos = [k, normalizar(m.nota)].filter(Boolean);
+    for (const t of textos) for (const c of cat) for (const p of c.claves || []) if (casa(t, p)) return { cat: seguir(cat, c), fuente: "clave" };
+    return { cat: porId(cat, "varios"), fuente: "nada" };
+  }
+  function etiquetaDe(m, aj = {}, cat = catalogo(aj), cd = null) {
+    if (!m || Number(m.importe) >= 0) return null;
+    if (m.etiqueta) return m.etiqueta;
+    const r = (aj.reglas || {})[normalizar(m.comercio)];
+    if (r) return r;
+    const d = cd || categoriaDe(m, aj, cat);
+    return d.fuente !== "nada" && d.cat ? d.cat.etiqueta || null : null;
+  }
+  function conceptoConocido(texto, aj = {}) {
+    const d = categoriaDe({ importe: -1, comercio: texto }, aj);
+    return d.fuente === "clave" || d.fuente === "regla";
+  }
+  function porRevisar(movs, aj = {}, cat = catalogo(aj)) {
+    const grupos = /* @__PURE__ */ new Map();
+    for (const m of movs) {
+      if (!m || m.deleted || Number(m.importe) >= 0) continue;
+      if (categoriaDe(m, aj, cat).fuente !== "nada") continue;
+      const k = normalizar(m.comercio) || "(sin nombre)";
+      if (!grupos.has(k)) grupos.set(k, { clave: k, comercio: m.comercio || "Gasto", movs: [] });
+      grupos.get(k).movs.push(m);
+    }
+    const lista2 = [...grupos.values()];
+    for (const g of lista2) {
+      g.movs.sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
+      g.total = g.movs.reduce((a, m) => a + Math.abs(Number(m.importe) || 0), 0);
+    }
+    return lista2.sort((a, b) => String(b.movs[0].fecha).localeCompare(String(a.movs[0].fecha)));
+  }
+  function resumenMes(movs, aj = {}, mes, cat = catalogo(aj)) {
+    const r = { total: 0, porEtiqueta: { necesario: 0, capricho: 0, basura: 0, sin: 0 }, porCategoria: [] };
+    const porCat = /* @__PURE__ */ new Map();
+    for (const m of movs) {
+      if (!m || m.deleted || Number(m.importe) >= 0 || !String(m.fecha).startsWith(mes)) continue;
+      const v = Math.abs(Number(m.importe) || 0);
+      const cd = categoriaDe(m, aj, cat);
+      const et = etiquetaDe(m, aj, cat, cd);
+      r.total += v;
+      r.porEtiqueta[et && r.porEtiqueta[et] != null ? et : "sin"] += v;
+      const id = cd.cat ? cd.cat.id : "varios";
+      if (!porCat.has(id)) porCat.set(id, { cat: cd.cat || porId(cat, "varios"), total: 0, n: 0 });
+      const x = porCat.get(id);
+      x.total += v;
+      x.n += 1;
+    }
+    r.porCategoria = [...porCat.values()].sort((a, b) => b.total - a.total);
+    return r;
+  }
+  function ordenParaElegir(movs, aj = {}, cat = catalogo(aj)) {
+    const uso = /* @__PURE__ */ new Map();
+    for (const m of movs) {
+      if (!m || m.deleted || Number(m.importe) >= 0) continue;
+      const d = categoriaDe(m, aj, cat);
+      if (d.fuente === "nada" || !d.cat) continue;
+      uso.set(d.cat.id, (uso.get(d.cat.id) || 0) + 1);
+    }
+    const pos = new Map(cat.map((c, i) => [c.id, i]));
+    return cat.filter((c) => !c.oculta && c.id !== "varios").sort((a, b) => (uso.get(b.id) || 0) - (uso.get(a.id) || 0) || pos.get(a.id) - pos.get(b.id)).concat(cat.filter((c) => c.id === "varios" && !c.oculta));
+  }
+  function distancia(a, b) {
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+    for (let j = 1; j <= b.length; j++) d[0][j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    return d[a.length][b.length];
+  }
+  var GENERICAS = /* @__PURE__ */ new Set(["gastos", "gasto", "compras", "compra", "cosas", "varios", "otros"]);
+  function parecida(nombre, lista2) {
+    const n = normalizar(nombre);
+    if (!n) return null;
+    for (const c of lista2) {
+      const x = normalizar(c.nombre);
+      if (x && (x === n || n.length >= 4 && (x.includes(n) || n.includes(x)))) return c;
+    }
+    for (const c of lista2) for (const p of c.claves || []) if (casa(n, p)) return c;
+    for (const c of lista2) {
+      const palabras = normalizar(c.nombre).split(/\s+/).filter((w) => w.length >= 4 && !GENERICAS.has(w));
+      if (palabras.some((w) => casaNombre(n, w))) return c;
+    }
+    for (const c of lista2) {
+      const x = normalizar(c.nombre);
+      if (x && Math.min(x.length, n.length) >= 4 && distancia(x, n) <= 2) return c;
+    }
+    return null;
+  }
+  function crearPropia(aj = {}, { id, nombre, etiqueta = null, emoji = EMOJI_PROPIA }) {
+    const cfg = aj.cats || {};
+    const propias = [...cfg.propias || [], { id, nombre: String(nombre).trim().slice(0, 40), etiqueta, emoji }];
+    return { cats: { ...cfg, propias } };
+  }
+  function cambiarCategoria(aj = {}, id, cambios) {
+    const cfg = aj.cats || {};
+    if (SERIE.some((c) => c.id === id)) return { cats: { ...cfg, cambios: { ...cfg.cambios || {}, [id]: { ...(cfg.cambios || {})[id] || {}, ...cambios } } } };
+    return { cats: { ...cfg, propias: (cfg.propias || []).map((c) => c.id === id ? { ...c, ...cambios } : c) } };
+  }
+  function juntar(aj = {}, desde, hacia) {
+    const reglasCat = Object.fromEntries(Object.entries(aj.reglasCat || {}).map(([k, v]) => [k, v === desde ? hacia : v]));
+    return { ...cambiarCategoria(aj, desde, { oculta: true, juntadaCon: hacia }), reglasCat };
   }
 
   // ../365/js/nucleo.js
@@ -2005,7 +2216,32 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
     guardarAjustes({ reglas: { ...ajustes().reglas || {}, [normalizar(comercio)]: etiqueta } });
   }
   function interpretarTexto(texto, fecha = hoy()) {
-    return interpretar(texto, { habitos: todas("habitos"), hoy: fecha });
+    const aj = ajustes();
+    return interpretar(texto, { habitos: todas("habitos"), hoy: fecha, esConceptoGasto: (t) => conceptoConocido(t, aj) });
+  }
+  var catalogo2 = () => catalogo(ajustes());
+  function aprenderCategoria(comercio, catId) {
+    const k = normalizar(comercio);
+    if (!k) return;
+    guardarAjustes({ reglasCat: { ...ajustes().reglasCat || {}, [k]: catId } });
+  }
+  function crearCategoria({ nombre, etiqueta = null }) {
+    const id = `p-${uuid().slice(0, 8)}`;
+    guardarAjustes(crearPropia(ajustes(), { id, nombre, etiqueta }));
+    return id;
+  }
+  function cambiarCategoria2(id, cambios) {
+    guardarAjustes(cambiarCategoria(ajustes(), id, cambios));
+  }
+  function juntarCategorias(desde, hacia) {
+    if (!desde || !hacia || desde === hacia) return 0;
+    guardarAjustes(juntar(ajustes(), desde, hacia));
+    let n = 0;
+    for (const m of todas("movimientos")) if (m.categoria === desde) {
+      guardar("movimientos", { ...m, categoria: hacia });
+      n++;
+    }
+    return n;
   }
   function aplicarInterpretacion(r, { origen = "app", ts = (/* @__PURE__ */ new Date()).toISOString(), fecha = hoy(), texto = "" } = {}) {
     if ((r.tipo === "gasto" || r.tipo === "ingreso") && r.datos.origen === "aviso") {
@@ -2182,6 +2418,9 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
     CONTEXTOS: () => CONTEXTOS,
     OPCIONES: () => OPCIONES,
     enlaceWhatsApp: () => enlaceWhatsApp,
+    montarMotivosAjustes: () => montarMotivosAjustes,
+    motivosPropios: () => motivosPropios,
+    motivosVisibles: () => motivosVisibles,
     pintar: () => pintar,
     pintarModulo: () => pintarModulo
   });
@@ -2574,6 +2813,99 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
   var OPCIONES = { llamar: "Llamar", escribir: "Escribir a alguien", respirar: "Esperar respirando", andar: "Andar", ducha: "Ducha", comer: "Comer algo", escribirlo: "Escribirlo", razones: "Mis razones", ayuda: "Ayuda profesional" };
   var RESULTADOS = { pasaron: "Pasaron", siguen: "Siguen", consumi: "Consumí" };
   var memoria = /* @__PURE__ */ new Map();
+  async function motivosPropios() {
+    const sobres = ajustes().ganasPropios || [];
+    const lista2 = [];
+    let faltan = 0;
+    for (const s of sobres) {
+      const ya = yaDescifrado(s);
+      if (ya) {
+        lista2.push(ya);
+        continue;
+      }
+      if (!desbloqueado()) {
+        faltan++;
+        continue;
+      }
+      try {
+        lista2.push(await descifrar2(s));
+      } catch (_) {
+        faltan++;
+      }
+    }
+    return { lista: lista2, faltan };
+  }
+  function motivosVisibles(propios) {
+    const ocultos = new Set(ajustes().ganasOcultos || []);
+    const tuyos = (propios && propios.lista || []).filter((p) => p && !p.oculto).map((p) => p.nombre);
+    return [...CONTEXTOS.filter((c) => !ocultos.has(c)), ...tuyos];
+  }
+  async function anadirMotivo(nombre) {
+    const item = { id: uuid(), nombre: String(nombre).trim().slice(0, 40), oculto: false };
+    const sobre = await cifrar2(item);
+    guardarAjustes({ ganasPropios: [...ajustes().ganasPropios || [], sobre] });
+    return item;
+  }
+  async function cambiarMotivo(id, cambios) {
+    const nuevos = [];
+    for (const s of ajustes().ganasPropios || []) {
+      let d = yaDescifrado(s);
+      if (!d && desbloqueado()) {
+        try {
+          d = await descifrar2(s);
+        } catch (_) {
+          d = null;
+        }
+      }
+      nuevos.push(d && d.id === id ? await cifrar2({ ...d, ...cambios }) : s);
+    }
+    guardarAjustes({ ganasPropios: nuevos });
+  }
+  function preguntarNuevoMotivo(visibles, alCrear) {
+    abrirHoja(`<h2>Otro motivo</h2>
+    <form class="col" data-motivo>
+      <label class="campo">Qué hay detrás<input type="text" name="nombre" maxlength="40" placeholder="Domingo por la tarde, ver a alguien…" required></label>
+      <p class="pequeno" data-parecido></p>
+      <p class="muted pequeno">Se guarda cifrado, como lo demás de Ganas.</p>
+      <button class="boton principal ancho" type="submit">Añadir</button>
+    </form>`, (c, cerrar) => {
+      const f = c.querySelector("[data-motivo]");
+      let avisado = null;
+      f.nombre.focus();
+      c.addEventListener("click", (e) => {
+        const u = e.target.closest("[data-usar]");
+        if (u) {
+          cerrar();
+          alCrear(u.dataset.usar);
+        }
+      });
+      f.onsubmit = async (e) => {
+        e.preventDefault();
+        const nombre = f.nombre.value.trim();
+        if (!nombre) return;
+        const p = parecida(nombre, visibles.map((n) => ({ nombre: n })));
+        if (p && avisado !== normalizar(nombre)) {
+          avisado = normalizar(nombre);
+          c.querySelector("[data-parecido]").innerHTML = `¿No es «${esc(p.nombre)}»? <button type="button" class="enlace" data-usar="${esc(p.nombre)}">Usar ese</button>. Si no, pulsa Añadir otra vez.`;
+          return;
+        }
+        try {
+          const item = await anadirMotivo(nombre);
+          cerrar();
+          aviso("Añadido y cifrado");
+          alCrear(item.nombre);
+        } catch (x) {
+          aviso(x.message);
+        }
+      };
+    });
+  }
+  function abrirDesbloqueoMotivos(alOk) {
+    abrirHoja(htmlDesbloqueo("Tus motivos van cifrados. Desbloquea para verlos."), (c, cerrar) => montarDesbloqueo(c, () => {
+      cerrar();
+      alOk();
+    }));
+  }
   alTerminarTemporizador("ganas", (t) => {
     if (t.marca_id) location.hash = `#/ganas/${t.marca_id}/seguimiento`;
   });
@@ -2623,18 +2955,37 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
     }
   }
   function pintarRegistro(el2, m) {
-    const st = { intensidad: null, contexto: /* @__PURE__ */ new Set() };
+    const st = { intensidad: null, contexto: /* @__PURE__ */ new Set(), visibles: motivosVisibles(null) };
+    const chipsMotivos = (lista2, faltan) => `${lista2.map((c) => `<button type="button" class="chip ${st.contexto.has(c) ? "activo" : ""}" data-ctx="${esc(c)}">${esc(c)}</button>`).join("")}${faltan ? '<button type="button" class="chip" data-mis-motivos>🔒 Los tuyos</button>' : ""}<button type="button" class="chip" data-otro-motivo>＋ Otro</button>`;
+    const repintarMotivos = async () => {
+      const propios = await motivosPropios();
+      st.visibles = motivosVisibles(propios);
+      const caja = el2.querySelector("[data-motivos]");
+      if (caja) caja.innerHTML = chipsMotivos(st.visibles, propios.faltan);
+    };
     el2.innerHTML = `<div class="pantalla">
     <a class="enlace" href="#/hoy">${icono("atras")} Hoy</a>
     <header class="cabecera"><h1>${m ? `Momento de las ${esc(horaMin(m.ts))}` : "Tengo ganas"}</h1><p class="muted">Apúntalo y elige qué hacer. Las ganas suben y bajan.</p></header>
     <span class="etiqueta">¿Cuántas? Del 1 al 10</span>
     <div class="intensidad">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `<button type="button" data-int="${n}">${n}</button>`).join("")}</div>
     <span class="etiqueta">¿Qué hay detrás? (opcional)</span>
-    <div class="chips">${CONTEXTOS.map((c) => `<button type="button" class="chip" data-ctx="${esc(c)}">${esc(c)}</button>`).join("")}</div>
+    <div class="chips" data-motivos>${chipsMotivos(motivosVisibles(null), 0)}</div>
     <button class="boton principal ancho" data-guardar disabled>Guardar y ver opciones</button>
     <button class="enlace" data-solo>Solo apuntar la hora y ver opciones</button>
   </div>`;
+    repintarMotivos();
     el2.onclick = async (e) => {
+      if (e.target.closest("[data-otro-motivo]")) {
+        preguntarNuevoMotivo(st.visibles, (nombre) => {
+          st.contexto.add(nombre);
+          repintarMotivos();
+        });
+        return;
+      }
+      if (e.target.closest("[data-mis-motivos]")) {
+        abrirDesbloqueoMotivos(repintarMotivos);
+        return;
+      }
       const i = e.target.closest("[data-int]");
       if (i) {
         st.intensidad = Number(i.dataset.int);
@@ -2859,6 +3210,74 @@ ${txt}` : txt }));
   </div>`;
     if (!desbloqueado()) montarDesbloqueo(el2, () => pintarModulo(el2));
     else app.vistaEstable = true;
+  }
+  function renombrarMotivo(p, alAcabar) {
+    abrirHoja(`<h2>Cambiar motivo</h2>
+    <form class="col" data-renombrar-form><label class="campo">Nombre<input type="text" name="nombre" value="${esc(p.nombre)}" maxlength="40" required></label>
+    <p class="muted pequeno">Lo que ya apuntaste con el nombre de antes se queda como estaba.</p>
+    <button class="boton principal ancho" type="submit">Guardar</button></form>`, (c, cerrar) => {
+      const f = c.querySelector("[data-renombrar-form]");
+      f.onsubmit = async (e) => {
+        e.preventDefault();
+        const nombre = f.nombre.value.trim();
+        if (!nombre) return;
+        try {
+          await cambiarMotivo(p.id, { nombre: nombre.slice(0, 40) });
+          cerrar();
+          aviso("Guardado y cifrado");
+          alAcabar();
+        } catch (x) {
+          aviso(x.message);
+        }
+      };
+    });
+  }
+  async function montarMotivosAjustes(caja) {
+    if (!caja) return;
+    let propios = { lista: [], faltan: 0 };
+    const pintar10 = async () => {
+      propios = await motivosPropios();
+      const ocultos = new Set(ajustes().ganasOcultos || []);
+      caja.innerHTML = `<section class="tarjeta col"><h2>Qué hay detrás</h2>
+      <p class="muted pequeno">Los motivos que salen al apuntar unas ganas. Esconde los que no uses y añade los tuyos: esos van cifrados.</p>
+      <div class="lista">${CONTEXTOS.map((c) => `<label class="interruptor"><span>${esc(c)}</span><input type="checkbox" data-serie="${esc(c)}" ${ocultos.has(c) ? "" : "checked"}></label>`).join("")}</div>
+      ${propios.lista.length ? `<span class="etiqueta">Los tuyos</span><div class="lista">${propios.lista.map((p) => `<div class="fila entre"><label class="interruptor crece"><span>${esc(p.nombre)}</span><input type="checkbox" data-propio="${esc(p.id)}" ${p.oculto ? "" : "checked"}></label><button type="button" class="enlace pequeno" data-renombrar="${esc(p.id)}">Cambiar</button></div>`).join("")}</div>` : ""}
+      ${propios.faltan ? `<p class="muted pequeno">${propios.faltan === 1 ? "Tienes 1 motivo tuyo cifrado." : `Tienes ${propios.faltan} motivos tuyos cifrados.`}</p><button type="button" class="boton ancho" data-desbloquear-motivos>${icono("candado")} Desbloquear para verlos</button>` : ""}
+      <button type="button" class="boton ancho" data-anadir-motivo>${icono("mas")} Añadir un motivo</button>
+    </section>`;
+    };
+    caja.addEventListener("change", async (e) => {
+      const s = e.target.closest("[data-serie]");
+      if (s) {
+        const set = new Set(ajustes().ganasOcultos || []);
+        if (s.checked) set.delete(s.dataset.serie);
+        else set.add(s.dataset.serie);
+        guardarAjustes({ ganasOcultos: [...set] });
+        aviso(s.checked ? "Se verá al apuntar" : "Escondido");
+        return;
+      }
+      const p = e.target.closest("[data-propio]");
+      if (p) {
+        await cambiarMotivo(p.dataset.propio, { oculto: !p.checked });
+        aviso(p.checked ? "Se verá al apuntar" : "Escondido");
+      }
+    });
+    caja.addEventListener("click", (e) => {
+      if (e.target.closest("[data-desbloquear-motivos]")) {
+        abrirDesbloqueoMotivos(pintar10);
+        return;
+      }
+      if (e.target.closest("[data-anadir-motivo]")) {
+        preguntarNuevoMotivo(motivosVisibles(propios), () => pintar10());
+        return;
+      }
+      const r = e.target.closest("[data-renombrar]");
+      if (r) {
+        const p = propios.lista.find((x) => x.id === r.dataset.renombrar);
+        if (p) renombrarMotivo(p, pintar10);
+      }
+    });
+    await pintar10();
   }
 
   // ../365/js/vistas/diario.js
@@ -3481,7 +3900,9 @@ ${txt}` : txt }));
       </section>
       <button class="boton principal ancho" type="submit">Guardar</button>
     </form>
+    <div data-motivos-ajustes></div>
   </div>`;
+    montarMotivosAjustes(el2.querySelector("[data-motivos-ajustes]"));
     el2.querySelector("[data-form]").onsubmit = (e) => {
       e.preventDefault();
       const f = e.target;
@@ -3676,7 +4097,8 @@ ${txt}` : txt }));
     { id: "armario", nombre: "Armario", sub: "Llega en la fase 2", icono: "armario", off: true }
   ];
   var atras = `<a class="enlace" href="#/espacio">${icono("atras")} Mi espacio</a>`;
-  var ETIQUETAS = { necesario: "Necesario", capricho: "Capricho", basura: "Basura o dulces" };
+  var { ETIQUETAS: ETIQUETAS2 } = categorias_exports;
+  var saltados = /* @__PURE__ */ new Set();
   function pintarInicio3(el2) {
     el2.innerHTML = `<div class="pantalla">
     <header class="cabecera"><h1>Mi espacio</h1></header>
@@ -3856,17 +4278,197 @@ ${txt}` : txt }));
     }
     return html;
   }
+  function htmlRejilla(lista2, actual = null) {
+    return `<div class="rejilla-cat">${lista2.map((c) => `<button type="button" class="cat ${c.id === actual ? "activo" : ""}" data-cat="${esc(c.id)}"><span class="emoji" aria-hidden="true">${esc(c.emoji || EMOJI_PROPIA)}</span><span>${esc(c.nombre)}</span></button>`).join("")}
+    <button type="button" class="cat nueva" data-cat-nueva><span class="emoji" aria-hidden="true">＋</span><span>Otra</span></button></div>`;
+  }
+  var listaParaElegir = () => ordenParaElegir(todas2("movimientos"), ajustes(), catalogo2());
+  function preguntarEtiqueta(comercio) {
+    abrirHoja(`<h2>¿Y cómo es ${esc(comercio)}?</h2>
+    <div class="botones">${Object.entries(ETIQUETAS2).map(([k, t]) => `<button class="boton" data-et-com="${k}">${t}</button>`).join("")}</div>
+    <button class="enlace" data-cerrar>Ahora no</button>`, (c, cerrar) => {
+      c.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-et-com]");
+        if (b) {
+          aprenderEtiqueta(comercio, b.dataset.etCom);
+          cerrar();
+        }
+      });
+    });
+  }
+  function nuevaCategoria(alCrear) {
+    abrirHoja(`<h2>Categoría nueva</h2>
+    <form class="col" data-nueva-cat>
+      <label class="campo">Nombre<input type="text" name="nombre" maxlength="40" placeholder="Regalos, peluquería…" required></label>
+      <span class="etiqueta">¿Cómo suele ser?</span>
+      <div class="segmentos">${Object.entries(ETIQUETAS2).map(([k, t]) => `<button type="button" data-et-nueva="${k}">${t}</button>`).join("")}</div>
+      <p class="pequeno" data-parecida></p>
+      <p class="error pequeno" role="alert"></p>
+      <button class="boton principal ancho" type="submit">Crear</button>
+    </form>`, (c, cerrar) => {
+      const f = c.querySelector("[data-nueva-cat]");
+      let et = null;
+      let avisada = null;
+      f.nombre.focus();
+      c.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-et-nueva]");
+        if (b) {
+          et = b.dataset.etNueva;
+          c.querySelectorAll("[data-et-nueva]").forEach((x) => x.classList.toggle("on", x === b));
+          return;
+        }
+        const u = e.target.closest("[data-usar]");
+        if (u) {
+          cerrar();
+          alCrear(u.dataset.usar);
+        }
+      });
+      f.onsubmit = (e) => {
+        e.preventDefault();
+        const nombre = f.nombre.value.trim();
+        if (!nombre) {
+          f.querySelector(".error").textContent = "Ponle un nombre.";
+          return;
+        }
+        const p = parecida(nombre, catalogo2().filter((x) => !x.oculta));
+        if (p && avisada !== normalizar(nombre)) {
+          avisada = normalizar(nombre);
+          c.querySelector("[data-parecida]").innerHTML = `¿No es lo mismo que <b>${esc(p.emoji)} ${esc(p.nombre)}</b>? <button type="button" class="enlace" data-usar="${esc(p.id)}">Usar esa</button>. Si no, pulsa Crear otra vez.`;
+          return;
+        }
+        const id = crearCategoria({ nombre, etiqueta: et });
+        cerrar();
+        aviso(`Categoría «${nombre}» creada`);
+        alCrear(id);
+      };
+    });
+  }
+  function elegirCategoria({ titulo, actual = null, soloEste = false }, alElegir) {
+    abrirHoja(`<h2>${esc(titulo)}</h2>
+    ${htmlRejilla(listaParaElegir(), actual)}
+    ${soloEste ? '<label class="interruptor"><span>Solo este gasto</span><input type="checkbox" data-solo-este></label><p class="muted pequeno">Si no lo marcas, vale para todo lo de este comercio.</p>' : ""}
+    <button class="boton ancho" data-cerrar>Cancelar</button>`, (c, cerrar) => {
+      c.addEventListener("click", (e) => {
+        const solo = !!(c.querySelector("[data-solo-este]") || {}).checked;
+        const b = e.target.closest("[data-cat]");
+        if (b) {
+          cerrar();
+          alElegir(b.dataset.cat, { solo });
+          return;
+        }
+        if (e.target.closest("[data-cat-nueva]")) {
+          cerrar();
+          nuevaCategoria((id) => alElegir(id, { solo }));
+        }
+      });
+    });
+  }
+  function editarCategoria(id) {
+    const cat = catalogo2();
+    const k = porId(cat, id);
+    const fija = k.id === "varios";
+    const otras = cat.filter((x) => x.id !== k.id && !x.oculta);
+    abrirHoja(`<h2>${esc(k.emoji)} ${esc(k.nombre)}</h2>
+    <form class="col" data-editar-cat>
+      <label class="campo">Nombre<input type="text" name="nombre" value="${esc(k.nombre)}" maxlength="40"></label>
+      <span class="etiqueta">¿Cómo suele ser?</span>
+      <div class="segmentos">${Object.entries(ETIQUETAS2).map(([e, t]) => `<button type="button" class="${k.etiqueta === e ? "on" : ""}" data-et-cat="${e}">${t}</button>`).join("")}</div>
+      ${fija ? "" : `<label class="interruptor"><span>Esconderla al elegir</span><input type="checkbox" name="oculta" ${k.oculta ? "checked" : ""}></label>
+      <label class="campo">Juntar con otra (todo pasa a esa)<select name="juntar"><option value="">No juntar</option>${otras.map((o) => `<option value="${esc(o.id)}">${esc(o.emoji)} ${esc(o.nombre)}</option>`).join("")}</select></label>`}
+      <button class="boton principal ancho" type="submit">Guardar</button>
+    </form>`, (c, cerrar) => {
+      const f = c.querySelector("[data-editar-cat]");
+      let et = k.etiqueta || null;
+      c.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-et-cat]");
+        if (b) {
+          et = b.dataset.etCat;
+          c.querySelectorAll("[data-et-cat]").forEach((x) => x.classList.toggle("on", x === b));
+        }
+      });
+      f.onsubmit = (e) => {
+        e.preventDefault();
+        if (!fija && f.juntar.value) {
+          const destino = porId(cat, f.juntar.value);
+          juntarCategorias(k.id, destino.id);
+          cerrar();
+          aviso(`Todo lo de «${k.nombre}» pasa a «${destino.nombre}»`);
+          return;
+        }
+        cambiarCategoria2(k.id, { nombre: f.nombre.value.trim() || k.nombre, etiqueta: et, ...fija ? {} : { oculta: f.oculta.checked } });
+        cerrar();
+        aviso("Guardado");
+      };
+    });
+  }
+  function gestionarCategorias() {
+    const cat = catalogo2().filter((c) => !c.juntadaCon);
+    abrirHoja(`<h2>Categorías</h2>
+    <p class="muted pequeno">Toca una para cambiarle el nombre, esconderla o juntarla con otra. Lo ya apuntado no se pierde.</p>
+    <div class="lista">${cat.map((c) => `<button class="fila-boton" data-editar="${esc(c.id)}"><span class="emoji" aria-hidden="true">${esc(c.emoji)}</span>
+      <span class="crece">${esc(c.nombre)}${c.oculta ? ' <span class="muted pequeno">· escondida</span>' : ""}</span><span class="muted pequeno">${c.etiqueta ? esc(ETIQUETAS2[c.etiqueta]) : ""}</span></button>`).join("")}</div>
+    <button class="boton principal ancho" data-nueva>${icono("mas")} Categoría nueva</button>
+    <button class="boton ancho" data-cerrar>Hecho</button>`, (c, cerrar) => {
+      c.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-editar]");
+        if (b) {
+          cerrar();
+          editarCategoria(b.dataset.editar);
+          return;
+        }
+        if (e.target.closest("[data-nueva]")) {
+          cerrar();
+          nuevaCategoria(() => gestionarCategorias());
+        }
+      });
+    });
+  }
+  function lineaMov(m, aj, cat) {
+    const gasto2 = Number(m.importe) < 0;
+    const cd = gasto2 ? categoriaDe(m, aj, cat) : null;
+    const et = gasto2 ? etiquetaDe(m, aj, cat, cd) : null;
+    const detalle = [
+      fechaCorta(m.fecha),
+      gasto2 ? cd.fuente === "nada" ? "sin categoría" : cd.cat.nombre : "ingreso",
+      et ? ETIQUETAS2[et] : "",
+      m.estado === "provisional" ? m.origen === "aviso" ? "del aviso del banco" : "provisional" : m.origen === "banco" ? "banco" : ""
+    ].filter(Boolean).map(esc).join(" · ");
+    return `<button class="fila-boton" data-mov="${esc(m.id)}"><span class="emoji" aria-hidden="true">${gasto2 ? esc(cd.fuente === "nada" ? "❔" : cd.cat.emoji) : "💶"}</span>
+    <span class="crece"><span class="nombre">${esc(m.comercio || "Movimiento")}</span><br><span class="muted pequeno">${detalle}</span></span>
+    <b>${gasto2 ? "" : "+"}${euros(Number(m.importe))}</b></button>`;
+  }
   function editarMovimiento(m) {
+    const aj = ajustes();
+    const cat = catalogo2();
+    const gasto2 = Number(m.importe) < 0;
+    const cd = gasto2 ? categoriaDe(m, aj, cat) : null;
+    const et = gasto2 ? etiquetaDe(m, aj, cat, cd) : null;
     abrirHoja(`<h2>${esc(m.comercio || "Movimiento")}</h2>
     <p class="muted">${esc(fechaLarga(m.fecha))} · ${euros(Math.abs(Number(m.importe)))}${m.origen === "efectivo" ? " · efectivo" : ""}</p>
-    <div class="botones">${Object.entries(ETIQUETAS).map(([k, t]) => `<button class="boton ${m.etiqueta === k ? "principal" : ""}" data-et="${k}">${t}</button>`).join("")}</div>
+    ${gasto2 ? `<span class="etiqueta">En qué</span>
+      <button class="boton ancho" data-cambiar-cat>${cd.fuente === "nada" ? "❔ Elegir categoría" : `${esc(cd.cat.emoji)} ${esc(cd.cat.nombre)} · cambiar`}</button>
+      <span class="etiqueta">Cómo es este gasto</span>
+      <div class="botones">${Object.entries(ETIQUETAS2).map(([k, t]) => `<button class="boton ${et === k ? "principal" : ""}" data-et="${k}">${t}</button>`).join("")}</div>` : ""}
     <button class="boton peligro ancho" data-borrar>Borrar</button>`, (c, cerrar) => {
       c.addEventListener("click", async (e) => {
         const b = e.target.closest("[data-et]");
         if (b) {
           guardar("movimientos", { ...m, etiqueta: b.dataset.et });
-          aprenderEtiqueta(m.comercio, b.dataset.et);
           cerrar();
+          aviso("Guardado en este gasto");
+          return;
+        }
+        if (e.target.closest("[data-cambiar-cat]")) {
+          cerrar();
+          elegirCategoria({ titulo: `¿En qué es «${m.comercio || "esto"}»?`, actual: cd.fuente === "nada" ? null : cd.cat.id, soloEste: true }, (id, { solo }) => {
+            const actual = una2("movimientos", m.id) || m;
+            if (solo) guardar("movimientos", { ...actual, categoria: id });
+            else {
+              aprenderCategoria(m.comercio, id);
+              if (actual.categoria && actual.categoria !== id) guardar("movimientos", { ...actual, categoria: null });
+            }
+            aviso(solo ? "Cambiado en este gasto" : "Cambiado para todo lo de este comercio");
+          });
           return;
         }
         if (e.target.closest("[data-borrar]")) {
@@ -3879,41 +4481,89 @@ ${txt}` : txt }));
       });
     });
   }
+  function verCategoria(id, mes) {
+    const aj = ajustes();
+    const cat = catalogo2();
+    const lista2 = todas2("movimientos").filter((m) => Number(m.importe) < 0 && String(m.fecha).startsWith(mes) && (categoriaDe(m, aj, cat).cat || {}).id === id).sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
+    const k = porId(cat, id);
+    abrirHoja(`<h2>${esc(k.emoji)} ${esc(k.nombre)}</h2>
+    <p class="muted">Este mes: ${euros(lista2.reduce((a, m) => a + Math.abs(Number(m.importe) || 0), 0))}</p>
+    <div class="lista">${lista2.map((m) => lineaMov(m, aj, cat)).join("")}</div>
+    <button class="boton ancho" data-cerrar>Cerrar</button>`, (c, cerrar) => {
+      c.addEventListener("click", (e) => {
+        const mv = e.target.closest("[data-mov]");
+        if (mv) {
+          const m = una2("movimientos", mv.dataset.mov);
+          cerrar();
+          if (m) editarMovimiento(m);
+        }
+      });
+    });
+  }
   function pintarFinanzas(el2) {
     const c = contexto();
     const mes = c.fecha.slice(0, 7);
+    const aj = ajustes();
+    const cat = catalogo2();
     const movs = [...c.movimientos].sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)) || String(b.updated_at).localeCompare(String(a.updated_at)));
-    const sinRevisar = movs.filter((m) => Number(m.importe) < 0 && !m.etiqueta);
+    const pend = porRevisar(movs, aj, cat).filter((g) => !saltados.has(g.clave));
+    const g0 = pend[0];
     const gastosMes = movs.filter((m) => String(m.fecha).startsWith(mes) && Number(m.importe) < 0);
-    const m0 = sinRevisar[0];
+    const r = resumenMes(movs, aj, mes, cat);
+    const vigiladas = VIGILADAS.map((id) => ({ k: porId(cat, id), t: (r.porCategoria.find((x) => x.cat.id === id) || { total: 0 }).total }));
     el2.innerHTML = `<div class="pantalla">${atras}
     <header class="cabecera"><h1>Dinero</h1><p class="muted">${todas2("bancos").some((b) => b.estado === "activo") ? "Los movimientos del banco entran solos cada día." : "Mientras el banco no esté conectado, cuenta lo que apuntes."}</p></header>
-    ${m0 ? `<section class="tarjeta destacada col">
-      <span class="etiqueta">Revisar gastos · ${sinRevisar.length === 1 ? "queda 1" : `quedan ${sinRevisar.length}`}</span>
-      <div class="siguiente"><div class="titulo">${esc(m0.comercio || "Gasto")} · ${euros(Math.abs(Number(m0.importe)))}</div></div>
-      <p class="muted">${esc(fechaCorta(m0.fecha))}${m0.origen === "efectivo" ? " · efectivo" : ""}</p>
-      <div class="botones">${Object.entries(ETIQUETAS).map(([k, t]) => `<button class="boton" data-et="${k}" data-id="${esc(m0.id)}">${t}</button>`).join("")}</div>
-      <p class="muted pequeno">Lo que elijas se recuerda para ese comercio.</p></section>` : '<section class="tarjeta suave"><p>Nada por revisar.</p></section>'}
+    ${g0 ? `<section class="tarjeta destacada col" data-revisar="${esc(g0.clave)}">
+      <span class="etiqueta">¿En qué es esto? · ${pend.length === 1 ? "queda 1" : `quedan ${pend.length}`}</span>
+      <div class="siguiente"><div class="titulo">${esc(g0.comercio)}</div></div>
+      <p class="muted">${g0.movs.length === 1 ? `${esc(fechaCorta(g0.movs[0].fecha))} · ${euros(g0.total)}` : `${g0.movs.length} gastos · ${euros(g0.total)} en total`}</p>
+      ${htmlRejilla(ordenParaElegir(movs, aj, cat))}
+      <div class="fila entre"><p class="muted pequeno">Vale para todo lo de este comercio.</p><button class="enlace pequeno" data-saltar>Ahora no</button></div>
+    </section>` : '<section class="tarjeta suave"><p>Nada por revisar.</p></section>'}
     <div class="botones"><button class="boton principal" data-accion="gasto">${icono("mas")} Gasto</button><button class="boton" data-accion="ingreso">${icono("mas")} Ingreso</button></div>
-    <section class="tarjeta col"><div class="fila entre"><h2>Este mes</h2><button class="enlace" data-accion="presupuesto">${ajustes().presupuesto ? "Cambiar presupuesto" : "Poner presupuesto"}</button></div>
+    <section class="tarjeta col"><div class="fila entre"><h2>Este mes</h2><button class="enlace" data-accion="presupuesto">${aj.presupuesto ? "Cambiar presupuesto" : "Poner presupuesto"}</button></div>
       ${bloquePresupuesto(gastosMes, movs.filter((m) => String(m.fecha).startsWith(mes) && Number(m.importe) > 0), c.fecha)}
-      ${gastosMes.length ? `<div class="fila entre"><span>Gastos</span><b>${euros(sumar(gastosMes))}</b></div>
-        ${Object.entries(ETIQUETAS).map(([k, t]) => `<div class="fila entre"><span>${t}</span><span>${euros(sumar(gastosMes.filter((m) => m.etiqueta === k)))}</span></div>`).join("")}` : '<p class="muted pequeno">Aún no hay gastos este mes.</p>'}
+      <div class="vigiladas">${vigiladas.map(({ k, t }) => `<button class="vig" data-ver-cat="${esc(k.id)}"><span class="emoji" aria-hidden="true">${esc(k.emoji)}</span><span class="muted pequeno">${esc(k.nombre)}</span><b>${euros(t)}</b></button>`).join("")}</div>
+      ${r.total ? `<div class="fila entre"><span>Gastos</span><b>${euros(r.total)}</b></div>
+        ${Object.entries(ETIQUETAS2).map(([k, t]) => `<div class="fila entre"><span>${t}</span><span>${euros(r.porEtiqueta[k])}</span></div>`).join("")}
+        ${r.porEtiqueta.sin ? `<div class="fila entre muted"><span>Sin clasificar</span><span>${euros(r.porEtiqueta.sin)}</span></div>` : ""}` : '<p class="muted pequeno">Aún no hay gastos este mes.</p>'}
     </section>
+    ${r.porCategoria.length ? `<section class="tarjeta col"><div class="fila entre"><h2>En qué</h2><button class="enlace" data-accion="categorias">Categorías</button></div>
+      <div class="lista">${r.porCategoria.map((x) => `<button class="fila-boton" data-ver-cat="${esc(x.cat.id)}"><span class="emoji" aria-hidden="true">${esc(x.cat.emoji)}</span><span class="crece">${esc(x.cat.nombre)} <span class="muted pequeno">· ${x.n}</span></span><b>${euros(x.total)}</b></button>`).join("")}</div></section>` : '<button class="enlace" data-accion="categorias">Categorías</button>'}
     ${tarjetaBanco()}
-    ${movs.length ? `<section class="tarjeta"><h2>Movimientos</h2><div class="lista">${movs.slice(0, 60).map((m) => `<button class="fila-boton" data-mov="${esc(m.id)}">
-      <span class="crece"><span class="nombre">${esc(m.comercio || "Movimiento")}</span><br><span class="muted pequeno">${esc(fechaCorta(m.fecha))}${m.etiqueta ? ` · ${ETIQUETAS[m.etiqueta]}` : ""}${m.estado === "provisional" ? m.origen === "aviso" ? " · del aviso del banco" : " · provisional" : m.origen === "banco" ? " · banco" : ""}</span></span>
-      <b>${Number(m.importe) < 0 ? "" : "+"}${euros(Number(m.importe))}</b></button>`).join("")}</div></section>` : ""}
+    ${movs.length ? `<section class="tarjeta"><h2>Movimientos</h2><div class="lista">${movs.slice(0, 60).map((m) => lineaMov(m, aj, cat)).join("")}</div></section>` : ""}
   </div>`;
     el2.onclick = (e) => {
-      const b = e.target.closest("[data-et]");
-      if (b) {
-        const m = una2("movimientos", b.dataset.id);
-        if (!m) return;
-        const et = b.dataset.et;
-        aprenderEtiqueta(m.comercio, et);
-        const clave2 = normalizar(m.comercio);
-        for (const x of todas2("movimientos")) if (!x.etiqueta && Number(x.importe) < 0 && normalizar(x.comercio) === clave2) guardar("movimientos", { ...x, etiqueta: et });
+      const rev = e.target.closest("[data-revisar]");
+      if (rev && g0) {
+        const b = e.target.closest("[data-cat]");
+        if (b) {
+          const k = porId(cat, b.dataset.cat);
+          aprenderCategoria(g0.comercio, k.id);
+          aviso(`${k.emoji} ${k.nombre}: aprendido para «${g0.comercio}»`);
+          const sinComo = !k.etiqueta && !g0.movs.some((m) => m.etiqueta) && !(aj.reglas || {})[g0.clave];
+          if (sinComo) preguntarEtiqueta(g0.comercio);
+          return;
+        }
+        if (e.target.closest("[data-cat-nueva]")) {
+          nuevaCategoria((id) => {
+            aprenderCategoria(g0.comercio, id);
+          });
+          return;
+        }
+        if (e.target.closest("[data-saltar]")) {
+          saltados.add(g0.clave);
+          pintarFinanzas(el2);
+          return;
+        }
+      }
+      const vc = e.target.closest("[data-ver-cat]");
+      if (vc) {
+        verCategoria(vc.dataset.verCat, mes);
+        return;
+      }
+      if (e.target.closest("[data-accion=categorias]")) {
+        gestionarCategorias();
         return;
       }
       if (e.target.closest("[data-accion=gasto]")) {
@@ -4252,7 +4902,7 @@ ${txt}` : txt }));
     const lista2 = habitosDelDia(c.habitos, f);
     const prog = progresoDia(c.habitos, c.indice, f);
     const ev = proximoEvento(c.eventos, c.ahoraMs);
-    const sinRevisar = c.movimientos.filter((m) => Number(m.importe) < 0 && !m.etiqueta).length;
+    const sinRevisar = porRevisar(c.movimientos, ajustes(), catalogo2()).length;
     const tareasHoy = c.tareas.filter((t) => !t.hecha && t.fecha === f);
     const rev = propuesta ? null : revisionPendiente();
     el2.innerHTML = `<div class="pantalla">
@@ -4718,11 +5368,11 @@ ${txt}` : txt }));
     el2.onclick = null;
     el2.querySelector("[data-copiar]").onclick = async () => aviso(await copiarTexto(codigo) ? "Copiado" : "No se pudo copiar");
     const ok = el2.querySelector("[data-ok]");
-    const seguir = el2.querySelector("[data-seguir]");
+    const seguir2 = el2.querySelector("[data-seguir]");
     ok.onchange = () => {
-      seguir.disabled = !ok.checked;
+      seguir2.disabled = !ok.checked;
     };
-    seguir.onclick = () => alListo();
+    seguir2.onclick = () => alListo();
   }
   function pintarFrase(el2, alListo) {
     document.body.classList.add("sin-tabs");
