@@ -509,7 +509,7 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
   var MODO_PRUEBA = !!otro && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(otro);
   var SUPABASE_URL = MODO_PRUEBA ? otro : URL_POR_DEFECTO;
   var SUPABASE_KEY = MODO_PRUEBA ? leer("365.apikey") || "clave-de-prueba" : CLAVE_POR_DEFECTO;
-  var VERSION = "1.2.0";
+  var VERSION = "1.3.0";
 
   // ../365/js/util.js
   var pad = (n) => String(n).padStart(2, "0");
@@ -3774,7 +3774,9 @@ ${txt}` : txt }));
     const b = todas2("bancos")[0];
     if (!b) {
       return `<section class="tarjeta suave col"><div class="fila entre"><h2>Banco</h2><span class="insignia">Sin conectar</span></div>
-      <p class="muted pequeno">Conectado, los gastos entran solos cada día y confirman los avisos sin duplicar. Se prepara una vez con el portátil (unos 15 minutos).</p>
+      <p class="muted pequeno">Conectado, los gastos entran solos cada día y confirman los avisos sin duplicar. Se prepara una vez (unos 15 minutos).</p>
+      <button class="boton" data-accion="banco-llave">${icono("llave")} Copiar la llave del banco (.pem)</button>
+      <input type="file" class="oculto-accesible" data-pem tabindex="-1" aria-hidden="true">
       <button class="boton" data-accion="banco-conectar">Conectar el banco</button></section>`;
     }
     const d = diasPermiso(b);
@@ -3789,6 +3791,25 @@ ${txt}` : txt }));
   }
   function errorBanco(x) {
     return /404|no está activad/i.test(x.message) ? "La conexión con el banco aún no está activada. La activamos juntos con el portátil." : x.message;
+  }
+  function leerPem(archivo) {
+    const r = new FileReader();
+    r.onload = () => {
+      const texto = String(r.result || "").trim();
+      if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+-----END [A-Z ]*PRIVATE KEY-----/.test(texto)) {
+        aviso("Ese archivo no es la llave del banco. Busca el .pem que se descargó al crear la aplicación.", { ms: 6e3 });
+        return;
+      }
+      abrirHoja(`<h2>Llave leída</h2>
+      <p class="muted">Toca Copiar y pégala en Supabase como secreto <b>EB_PRIVATE_KEY</b>. No la pegues en ningún otro sitio.</p>
+      <button class="boton principal ancho" data-copiar-pem>${icono("copiar")} Copiar la llave</button>
+      <textarea readonly rows="4" class="pequeno" data-pem-texto>${esc(texto)}</textarea>
+      <button class="boton ancho" data-cerrar>Hecho</button>`, (c) => {
+        c.querySelector("[data-copiar-pem]").onclick = async () => aviso(await copiarTexto(texto) ? "Llave copiada" : "No se pudo copiar: mantén el dedo en el texto y copia");
+      });
+    };
+    r.onerror = () => aviso("No se pudo leer el archivo");
+    r.readAsText(archivo);
   }
   async function conectarBanco() {
     aviso("Abriendo la web del banco…");
@@ -3909,6 +3930,15 @@ ${txt}` : txt }));
       }
       if (e.target.closest("[data-accion=banco-conectar]")) {
         conectarBanco();
+        return;
+      }
+      if (e.target.closest("[data-accion=banco-llave]")) {
+        const inp = el2.querySelector("[data-pem]");
+        inp.value = "";
+        inp.onchange = () => {
+          if (inp.files && inp.files[0]) leerPem(inp.files[0]);
+        };
+        inp.click();
         return;
       }
       if (e.target.closest("[data-accion=banco-sync]")) {
