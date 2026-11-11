@@ -287,6 +287,12 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
 .mapa-anual span.n0 { background: var(--card-2); }
 .temporizador h1 { font-size: 1.6em; }
 .mapa-anual span.futuro { background: var(--card-2); opacity: .45; }
+ol.pasos { margin: 0; padding-left: 1.5em; display: flex; flex-direction: column; gap: 12px; }
+ol.pasos li { padding-left: 4px; }
+ol.pasos li::marker { font-weight: 700; color: var(--accent); }
+.habito .check b { font-size: .95em; color: var(--muted); }
+.error a { color: var(--accent); }
+.progreso.pasado > span { background: var(--warn); }
 
 </style>
 <script>try{var t=localStorage.getItem('365.tema'),l=localStorage.getItem('365.letra');if(t)document.documentElement.dataset.tema=t;if(l)document.documentElement.dataset.letra=l;}catch(e){}</script>
@@ -304,7 +310,7 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
   };
 
   // ../365/js/db.js
-  var TABLAS = ["perfil", "fases", "habitos", "registros", "dias", "diario", "marcas", "fichajes", "eventos", "capturas", "tareas", "notas", "movimientos", "conexiones"];
+  var TABLAS = ["perfil", "fases", "habitos", "registros", "dias", "diario", "marcas", "fichajes", "eventos", "capturas", "tareas", "notas", "movimientos", "conexiones", "bancos"];
   var cache = new Map(TABLAS.map((t) => [t, /* @__PURE__ */ new Map()]));
   var cola = /* @__PURE__ */ new Map();
   var metas = /* @__PURE__ */ new Map();
@@ -503,7 +509,7 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
   var MODO_PRUEBA = !!otro && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(otro);
   var SUPABASE_URL = MODO_PRUEBA ? otro : URL_POR_DEFECTO;
   var SUPABASE_KEY = MODO_PRUEBA ? leer("365.apikey") || "clave-de-prueba" : CLAVE_POR_DEFECTO;
-  var VERSION = "1.0.0";
+  var VERSION = "1.2.0";
 
   // ../365/js/util.js
   var pad = (n) => String(n).padStart(2, "0");
@@ -626,8 +632,11 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     tareas: ["titulo", "fecha", "hecha", "area", "origen"],
     notas: ["texto", "area", "fecha"],
     movimientos: ["fecha", "importe", "moneda", "comercio", "categoria", "etiqueta", "origen", "estado", "ext_id", "nota"],
-    conexiones: ["nombre", "token_hash", "activo", "ultimo_uso"]
+    conexiones: ["nombre", "token_hash", "activo", "ultimo_uso"],
+    // Solo lectura: la escribe la función «banco» en el servidor.
+    bancos: ["aspsp", "pais", "estado", "valido_hasta", "cuentas", "saldo", "saldo_ts", "ultima_sync", "ultimo_error"]
   };
+  var OPCIONALES = /* @__PURE__ */ new Set(["bancos"]);
   var ahora = () => (/* @__PURE__ */ new Date()).toISOString();
   var DEFECTOS = {
     perfil: { inicio: hoy, ajustes: () => ({}) },
@@ -857,7 +866,14 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     const d = new Date(String(ts).replace(/(\.\d{3})\d+/, "$1"));
     return new Date(d.getTime() - min * 6e4).toISOString();
   }
+  function olvidarAusencia(tabla) {
+    ponerMeta(`ausente:${tabla}`, void 0);
+  }
   async function bajarTabla(tabla) {
+    if (OPCIONALES.has(tabla)) {
+      const a = meta(`ausente:${tabla}`);
+      if (a && Date.now() - a < 6 * 36e5) return;
+    }
     const cursor = meta(`cursor:${tabla}`);
     const desde = cursor ? restarMinutos(cursor, 2) : null;
     let max = cursor || null;
@@ -865,6 +881,10 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
       let q = `/rest/v1/${tabla}?select=*&order=updated_at.asc,id.asc&limit=1000&offset=${offset}`;
       if (desde) q += `&updated_at=gte.${encodeURIComponent(desde)}`;
       const r = await api(q);
+      if (!r.ok && OPCIONALES.has(tabla) && (r.status === 404 || r.status === 400)) {
+        ponerMeta(`ausente:${tabla}`, Date.now());
+        return;
+      }
       if (!r.ok) throw new Error(`No se pudo recibir ${tabla} (${r.status})`);
       const filas = await r.json();
       aplicarRemotas(tabla, filas);
@@ -924,6 +944,23 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
   function urlIngest() {
     return `${SUPABASE_URL}/functions/v1/ingest`;
   }
+  async function llamarFuncion(nombre, accion, cuerpo = {}) {
+    const t = await token();
+    if (!t) throw new Error("Sin sesión");
+    let r;
+    try {
+      r = await conTiempo(`${SUPABASE_URL}/functions/v1/${nombre}?accion=${encodeURIComponent(accion)}`, {
+        method: "POST",
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify(cuerpo)
+      }, 6e4);
+    } catch (e) {
+      throw new Error(sinRed(e));
+    }
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || `El servidor respondió ${r.status}`);
+    return j;
+  }
 
   // ../365/js/cripto.js
   var enc = new TextEncoder();
@@ -968,8 +1005,8 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     const sal = azar(16);
     const iv = azar(12);
     const k = await claveDe(secreto, sal, iter);
-    const datos = await sutil.encrypt({ name: "AES-GCM", iv }, k, bytes);
-    return { sal: aB64(sal), iv: aB64(iv), datos: aB64(datos), iter };
+    const datos2 = await sutil.encrypt({ name: "AES-GCM", iv }, k, bytes);
+    return { sal: aB64(sal), iv: aB64(iv), datos: aB64(datos2), iter };
   }
   async function desenvolver(env, secreto) {
     const k = await claveDe(secreto, deB64(env.sal), env.iter);
@@ -1021,8 +1058,8 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     const sal = azar(16);
     const iv = azar(12);
     const k = await claveCompartida(eph.privateKey, pub, sal);
-    const datos = await sutil.encrypt({ name: "AES-GCM", iv }, k, enc.encode(JSON.stringify(obj)));
-    return { v: 1, e: aB64(epub), s: aB64(sal), iv: aB64(iv), d: aB64(datos) };
+    const datos2 = await sutil.encrypt({ name: "AES-GCM", iv }, k, enc.encode(JSON.stringify(obj)));
+    return { v: 1, e: aB64(epub), s: aB64(sal), iv: aB64(iv), d: aB64(datos2) };
   }
   async function descifrar(priv, sobre) {
     const epub = await sutil.importKey("raw", deB64(sobre.e), CURVA, false, []);
@@ -1053,12 +1090,6 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     { id: "pareja", nombre: "Relación" }
   ];
   var nombreArea = (id) => (AREAS.find((a) => a.id === id) || { nombre: "Otros" }).nombre;
-  var LUGARES = [
-    { id: "casa", nombre: "Casa" },
-    { id: "trabajo", nombre: "Trabajo" },
-    { id: "gimnasio", nombre: "Gimnasio" },
-    { id: "madre", nombre: "Casa de mi madre" }
-  ];
   function previstoEn(h, fecha) {
     return (h.dias || []).includes(diaSemana(fecha)) && (!h.inicio || h.inicio <= fecha);
   }
@@ -1242,6 +1273,32 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     if (ev && fechaDeTs(ev.inicio) === fecha) return { tipo: "evento", evento: ev, titulo: ev.titulo, detalle: `Hoy a las ${horaMin(ev.inicio)}` };
     if (delDia.length) return { tipo: "libre", titulo: "Lo de hoy está hecho", detalle: "El resto del día es tuyo." };
     return { tipo: "libre", titulo: "Nada previsto ahora", detalle: "Si quieres, apunta algo o escribe una línea en el diario." };
+  }
+  var nombreClave = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+  var mismoNombre = (a, b) => nombreClave(a) === nombreClave(b);
+  function revisionHabitos(habitos, registros, limite = 3) {
+    const vivos = habitos.filter((h) => !h.deleted && h.estado === "activo");
+    const cuenta = /* @__PURE__ */ new Map();
+    for (const r of registros) if (!r.deleted) cuenta.set(r.habito_id, (cuenta.get(r.habito_id) || 0) + 1);
+    const grupos = /* @__PURE__ */ new Map();
+    for (const h of vivos) {
+      const k = nombreClave(h.nombre);
+      if (!grupos.has(k)) grupos.set(k, []);
+      grupos.get(k).push(h);
+    }
+    const repetidos = [];
+    for (const lista2 of grupos.values()) {
+      if (lista2.length < 2) continue;
+      lista2.sort((a, b) => (cuenta.get(b.id) || 0) - (cuenta.get(a.id) || 0) || (b.fase_id ? 1 : 0) - (a.fase_id ? 1 : 0) || (a.orden || 0) - (b.orden || 0));
+      repetidos.push({ queda: lista2[0], sobran: lista2.slice(1) });
+    }
+    const sobran = new Set(repetidos.flatMap((r) => r.sobran.map((h) => h.id)));
+    const resto = vivos.filter((h) => !sobran.has(h.id));
+    const esAuto = (h) => !!h.auto && h.auto !== "diario";
+    const sinPresion = resto.filter((h) => esAuto(h) && h.cuenta !== false);
+    const exigentes = resto.filter((h) => h.cuenta !== false && !esAuto(h)).sort((a, b) => (a.orden || 0) - (b.orden || 0));
+    const pausar = exigentes.length > limite ? exigentes.slice(limite) : [];
+    return { repetidos, sinPresion, pausar, hayAlgo: repetidos.length + sinPresion.length + pausar.length > 0 };
   }
   function nivelDia(habitos, indice, fecha) {
     const lista2 = habitosDelDia(habitos, fecha).filter((h) => h.cuenta !== false);
@@ -1587,6 +1644,49 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     }
     return null;
   }
+  function numeroDinero(s) {
+    let n = String(s).replace(/\s/g, "").replace(/^[-+]/, "");
+    const coma = n.lastIndexOf(",");
+    const punto = n.lastIndexOf(".");
+    if (coma > -1 && punto > -1) {
+      n = coma > punto ? n.replace(/\./g, "").replace(",", ".") : n.replace(/,/g, "");
+    } else if (coma > -1) {
+      n = /,\d{1,2}$/.test(n) ? n.replace(/\./g, "").replace(",", ".") : n.replace(/,/g, "");
+    } else if (punto > -1 && !/\.\d{1,2}$/.test(n)) {
+      n = n.replace(/\./g, "");
+    }
+    const v = Number(n);
+    return Number.isFinite(v) ? v : null;
+  }
+  function esAviso(texto) {
+    return /^\s*(aviso|banco)\s*[:·-]/i.test(String(texto || ""));
+  }
+  function interpretarAviso(texto, hoyF) {
+    const original = String(texto || "").replace(/^\s*(aviso|banco)\s*[:·-]\s*/i, "").trim();
+    const t = normalizar(original);
+    const m = original.match(/(?:€\s?)([-+]?\d[\d.,\s]*\d|\d)|([-+]?\d[\d.,]*\d|\d)\s?(?:€|eur\b|euros?\b)/i);
+    if (!m) return { tipo: "ignorar", resumen: "Aviso sin importe" };
+    const importe2 = numeroDinero(m[1] || m[2]);
+    if (importe2 == null || importe2 <= 0 || importe2 > 1e5) return { tipo: "ignorar", resumen: "Aviso sin importe" };
+    const entra = /\b(recibido|recibiste|ingreso|ingresado|te han enviado|te ha enviado|devolucion|reembolso|abono|received|refund|incoming)\b/.test(t) || /^\+/.test(m[0].trim());
+    const tras = original.slice(original.indexOf(m[0]) + m[0].length);
+    let quien = "";
+    const p = tras.match(/\b(?:en|at|in|a|de|from|to|para)\s+(.+)$/i);
+    if (p) quien = p[1];
+    else {
+      const antes = original.slice(0, original.indexOf(m[0]));
+      const q = antes.match(/([^:·]+)[:·]\s*$/) || tras.match(/^\s*[·:,-]?\s*(.+)$/);
+      if (q) quien = q[1];
+    }
+    quien = quien.replace(/[.!]+$/, "").replace(/\s+con (tu )?tarjeta.*$/i, "").replace(/\s+/g, " ").trim().slice(0, 80);
+    if (!quien) quien = entra ? "Ingreso" : "Pago con tarjeta";
+    const bonito = quien === quien.toUpperCase() ? quien.charAt(0) + quien.slice(1).toLowerCase() : quien;
+    return {
+      tipo: entra ? "ingreso" : "gasto",
+      datos: { importe: entra ? importe2 : -importe2, comercio: bonito, origen: "aviso", estado: "provisional", fecha: hoyF },
+      resumen: `${entra ? "Ingreso" : "Gasto"} de ${euros(importe2)} · ${bonito}`
+    };
+  }
   function interpretar(texto, { habitos = [], hoy: hoyF } = {}) {
     const original = String(texto || "").trim();
     const t = normalizar(original);
@@ -1908,6 +2008,12 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     return interpretar(texto, { habitos: todas("habitos"), hoy: fecha });
   }
   function aplicarInterpretacion(r, { origen = "app", ts = (/* @__PURE__ */ new Date()).toISOString(), fecha = hoy(), texto = "" } = {}) {
+    if ((r.tipo === "gasto" || r.tipo === "ingreso") && r.datos.origen === "aviso") {
+      const igual = todas("movimientos").find((m2) => m2.origen === "aviso" && m2.fecha === (r.datos.fecha || fecha) && Number(m2.importe) === r.datos.importe && normalizar(m2.comercio) === normalizar(r.datos.comercio) && Math.abs(tsMs(m2.updated_at || ts) - tsMs(ts)) < 12e4);
+      if (igual) return { tipo: r.tipo, id: igual.id, resumen: `${r.resumen} (ya estaba)` };
+      const m = guardar("movimientos", { id: uuid(), fecha: r.datos.fecha || fecha, importe: r.datos.importe, moneda: "EUR", comercio: r.datos.comercio, categoria: null, etiqueta: r.tipo === "gasto" ? etiquetaAprendida(r.datos.comercio) : null, origen: "aviso", estado: "provisional", ext_id: null, nota: null });
+      return { tipo: r.tipo, id: m.id, resumen: r.resumen };
+    }
     if (r.tipo === "gasto") {
       const m = guardar("movimientos", { id: uuid(), fecha: r.datos.fecha || fecha, importe: r.datos.importe, moneda: "EUR", comercio: r.datos.comercio, categoria: null, etiqueta: etiquetaAprendida(r.datos.comercio), origen: r.datos.origen, estado: r.datos.estado, ext_id: null, nota: texto || null });
       return { tipo: "gasto", id: m.id, resumen: r.resumen };
@@ -1932,6 +2038,12 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     for (const c of todas("capturas")) {
       if (c.procesada) continue;
       const fecha = fechaDeTs(c.ts);
+      if (esAviso(c.texto)) {
+        const a = interpretarAviso(c.texto, fecha);
+        const res2 = a.tipo === "ignorar" ? { tipo: "ignorado", resumen: a.resumen } : aplicarInterpretacion(a, { origen: "aviso", ts: c.ts, fecha });
+        guardar("capturas", { ...c, procesada: true, resultado: res2 });
+        continue;
+      }
       const r = interpretarTexto(c.texto, fecha);
       if (r.tipo === "vacio") {
         guardar("capturas", { ...c, procesada: true, resultado: { tipo: "vacio" } });
@@ -1986,7 +2098,7 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
   // ../365/js/vistas/hoy.js
   var hoy_exports = {};
   __export(hoy_exports, {
-    pintar: () => pintar
+    pintar: () => pintar6
   });
 
   // ../365/js/frases.js
@@ -2055,6 +2167,24 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
   function fraseDelDia(fecha) {
     return FRASES[diaDelAnio(fecha) % FRASES.length];
   }
+
+  // ../365/js/vistas/espacio.js
+  var espacio_exports = {};
+  __export(espacio_exports, {
+    bancoPorRenovar: () => bancoPorRenovar,
+    diasPermiso: () => diasPermiso,
+    pintar: () => pintar5
+  });
+
+  // ../365/js/vistas/ganas.js
+  var ganas_exports = {};
+  __export(ganas_exports, {
+    CONTEXTOS: () => CONTEXTOS,
+    OPCIONES: () => OPCIONES,
+    enlaceWhatsApp: () => enlaceWhatsApp,
+    pintar: () => pintar,
+    pintarModulo: () => pintarModulo
+  });
 
   // ../365/js/vistas/comunes.js
   function deshacerApunte(res) {
@@ -2334,8 +2464,10 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
         }
       });
       const f = c.querySelector("[data-form]");
+      let enviando = false;
       f.onsubmit = (e) => {
         e.preventDefault();
+        if (enviando) return;
         const err = f.querySelector(".error");
         const dias = [...c.querySelectorAll("[data-dia].on")].map((b) => Number(b.dataset.dia));
         const nombre = f.nombre.value.trim();
@@ -2347,6 +2479,12 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
           err.textContent = "Elige al menos un día.";
           return;
         }
+        const repetido = todas2("habitos").find((x) => x.estado !== "finalizado" && (!h || x.id !== h.id) && mismoNombre(x.nombre, nombre));
+        if (repetido) {
+          err.innerHTML = `Ya tienes «${esc(repetido.nombre)}»${repetido.estado === "pausado" ? " en pausa" : ""}. <a href="#/habitos/${encodeURIComponent(repetido.id)}" data-cerrar>Ábrelo aquí</a> para cambiarlo.`;
+          return;
+        }
+        enviando = true;
         let faseId = h ? h.fase_id || null : null;
         if (fase && f.en_fase) faseId = f.en_fase.checked ? fase.id : faseId === fase.id ? null : faseId;
         const base = h || { id: uuid(), estado: "activo", inicio: hoy(), orden: todas2("habitos").length };
@@ -2369,6 +2507,59 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
       };
     });
   }
+  var desmarcados = /* @__PURE__ */ new Set();
+  function revisionPendiente() {
+    const a = ajustes();
+    const rev = revisionHabitos(todas2("habitos"), todas2("registros"));
+    if (!rev.hayAlgo) return null;
+    if (!rev.repetidos.length && a.revisionPospuesta && a.revisionPospuesta > hoy()) return null;
+    return rev;
+  }
+  function htmlRevision(rev) {
+    const fase = todas2("fases").find((f) => f.estado === "activa");
+    const hasta = fase ? `hasta que «${esc(fase.nombre)}» salga sola` : "por ahora";
+    const fila2 = (id, accion, texto) => `<label class="interruptor"><span>${texto}</span><input type="checkbox" data-rev="${accion}" value="${esc(id)}" ${desmarcados.has(`${accion}|${id}`) ? "" : "checked"}></label>`;
+    return `<section class="tarjeta aviso col" data-revision>
+    <span class="etiqueta">Revisar hábitos</span>
+    <p>Para que lo que ya funciona no se rompa, te propongo:</p>
+    ${rev.repetidos.map((r) => r.sobran.map((h) => fila2(h.id, "borrar", `Borrar «${esc(h.nombre)}» repetido`)).join("")).join("")}
+    ${rev.sinPresion.map((h) => fila2(h.id, "sinpresion", `«${esc(h.nombre)}» sin presión: se apunta solo y no cuenta`)).join("")}
+    ${rev.pausar.map((h) => fila2(h.id, "pausar", `Pausar «${esc(h.nombre)}» ${hasta}`)).join("")}
+    <p class="muted pequeno">Pausar no borra nada. Cuando la fase salga sola, te propongo reactivarlos.</p>
+    <div class="botones"><button class="boton principal" data-accion="rev-aplicar">Aplicar lo marcado</button><button class="boton suave" data-accion="rev-luego">Ahora no</button></div>
+  </section>`;
+  }
+  function manejarRevision(e, raiz) {
+    const cb = e.target.closest("[data-rev]");
+    if (cb) {
+      const k = `${cb.dataset.rev}|${cb.value}`;
+      if (cb.checked) desmarcados.delete(k);
+      else desmarcados.add(k);
+      return true;
+    }
+    const b = e.target.closest('[data-accion^="rev-"]');
+    if (!b) return false;
+    if (b.dataset.accion === "rev-luego") {
+      guardarAjustes({ revisionPospuesta: sumarDias(hoy(), 14) });
+      aviso("Vale. Te lo vuelvo a proponer en dos semanas.");
+      return true;
+    }
+    let n = 0;
+    for (const c of raiz.querySelectorAll("[data-rev]:checked")) {
+      const h = una2("habitos", c.value);
+      if (!h) continue;
+      if (c.dataset.rev === "borrar") {
+        for (const r of todas2("registros").filter((x) => x.habito_id === h.id)) borrar2("registros", r.id);
+        borrar2("habitos", h.id);
+      } else if (c.dataset.rev === "sinpresion") guardar("habitos", { ...h, cuenta: false });
+      else if (c.dataset.rev === "pausar") guardar("habitos", { ...h, estado: "pausado" });
+      n++;
+    }
+    guardarAjustes({ revisionPospuesta: sumarDias(hoy(), 14) });
+    desmarcados.clear();
+    aviso(n ? "Hecho. Lo pausado sigue ahí, sin borrar." : "Sin cambios");
+    return true;
+  }
   async function eliminarHabito(h) {
     const si = await confirmar2({ titulo: `¿Eliminar «${h.nombre}»?`, texto: "Se borra el hábito y su historial. Si solo quieres dejarlo, mejor pausarlo o finalizarlo.", si: "Eliminar", peligro: true });
     if (!si) return false;
@@ -2378,415 +2569,296 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     return true;
   }
 
-  // ../365/js/vistas/hoy.js
-  alTerminarTemporizador("libre", (t, completo) => {
-    if (completo) aviso("Hecho. Lo que venga ahora es extra.");
+  // ../365/js/vistas/ganas.js
+  var CONTEXTOS = ["Cansancio", "Aburrimiento", "Estrés", "Soledad", "Quedada o fiesta", "Discusión", "Celebración", "Hambre"];
+  var OPCIONES = { llamar: "Llamar", escribir: "Escribir a alguien", respirar: "Esperar respirando", andar: "Andar", ducha: "Ducha", comer: "Comer algo", escribirlo: "Escribirlo", razones: "Mis razones", ayuda: "Ayuda profesional" };
+  var RESULTADOS = { pasaron: "Pasaron", siguen: "Siguen", consumi: "Consumí" };
+  var memoria = /* @__PURE__ */ new Map();
+  alTerminarTemporizador("ganas", (t) => {
+    if (t.marca_id) location.hash = `#/ganas/${t.marca_id}/seguimiento`;
   });
-  function tarjetaFase1() {
-    return `<section class="tarjeta destacada col" data-fase1>
-    <span class="etiqueta">Fase 1 · propuesta</span>
-    <h2>Mañanas tranquilas</h2>
-    <p>Tres cosas pequeñas al levantarte. Nada más hasta que salgan casi solas.</p>
-    <label class="interruptor"><span>Agua · un vaso</span><input type="checkbox" name="agua" checked></label>
-    <label class="interruptor"><span>Meditación · 5 minutos</span><input type="checkbox" name="meditacion" checked></label>
-    <label class="interruptor"><span>Diario · una pregunta</span><input type="checkbox" name="diario" checked></label>
-    <label class="campo">Me levanto a las<input type="time" name="hora" value="06:00"></label>
-    <p class="muted pequeno">El gimnasio y las visitas se apuntan solos cuando configures los sitios. Sin exigencia.</p>
-    <button class="boton principal ancho" data-accion="aprobar-fase1">Empezar la fase 1</button>
-    <button class="enlace" data-accion="descartar-fase1">Ahora no, prefiero montarlo yo</button>
-  </section>`;
+  var limpiarTel = (t) => String(t || "").replace(/[^\d+]/g, "");
+  function enlaceWhatsApp(c) {
+    let n = limpiarTel(c.tel).replace(/^\+/, "").replace(/^00/, "");
+    if (/^[6789]\d{8}$/.test(n)) n = `34${n}`;
+    return `https://wa.me/${n}?text=${encodeURIComponent(c.mensaje || "Oye, ¿tienes cinco minutos para hablar?")}`;
   }
-  function tarjetaSiguiente(s) {
-    let botones = "";
-    let detalle = s.detalle || "";
-    let etiqueta = "Lo siguiente";
-    if (s.tipo === "habito") {
-      const h = s.habito;
-      const id = esc(h.id);
-      etiqueta = `Lo siguiente${h.hora ? ` · ${h.hora}` : ""}`;
-      detalle = [h.duracion_min ? minutosTexto(h.duracion_min) : null, h.minimo ? `mínimo: ${h.minimo}` : null].filter(Boolean).join(" · ");
-      const minimo = h.minimo && h.auto !== "diario" ? `<button class="boton suave" data-accion="minimo" data-id="${id}">Solo el mínimo</button>` : "";
-      if (h.auto === "diario") botones = `<button class="boton principal" data-accion="empezar" data-id="${id}">${icono("escribir")} Escribir</button>`;
-      else if (h.temporizador) botones = `<button class="boton principal" data-accion="empezar" data-id="${id}">${icono("play")} Empezar</button>${minimo}`;
-      else botones = `<button class="boton principal" data-accion="empezar" data-id="${id}">${icono("check")} Hecho</button>${minimo}`;
-    } else if (s.tipo === "tarde") {
-      botones = '<button class="boton principal" data-accion="tarde-arrancar">Empiezo con 2 minutos</button><button class="boton suave" data-accion="tarde-descanso">Hoy descanso</button>';
-    } else if (s.tipo === "seguimiento") {
-      botones = `<button class="boton principal" data-accion="seguimiento" data-id="${esc(s.marca.id)}">Responder</button>`;
-    } else if (s.tipo === "marca") {
-      botones = `<button class="boton principal" data-accion="completar-marca" data-id="${esc(s.marca.id)}">Completar</button>`;
-    }
-    const suave = s.tipo === "libre" || s.tipo === "evento";
-    return `<section class="tarjeta ${suave ? "suave" : "destacada"} siguiente" data-siguiente="${s.tipo}">
-    <span class="etiqueta">${esc(etiqueta)}</span>
-    <div class="titulo">${esc(s.titulo)}</div>
-    ${detalle ? `<p class="muted">${esc(detalle)}</p>` : ""}
-    ${botones ? `<div class="botones">${botones}</div>` : ""}
-  </section>`;
-  }
-  function filaHabito(h, c) {
-    const r = c.indice.get(`${h.id}|${c.fecha}`);
-    const est = r ? r.estado : "";
-    let txt = "";
-    if (r && r.estado === "hecho") txt = `Hecho a las ${horaMin(r.ts)}${r.origen === "auto" ? " · se apuntó solo" : r.origen === "temporizador" ? " · con temporizador" : ""}`;
-    else if (r && r.estado === "minimo") txt = "Versión mínima";
-    else if (r) txt = "Hoy no";
-    const auto = h.auto && h.auto !== "diario";
-    const detalle = txt || [detalleHabito(h), auto ? "se apunta solo" : null].filter(Boolean).join(" · ");
-    const ic = est === "hecho" || est === "minimo" ? icono("check") : est === "no" ? icono("x") : auto ? `<span class="muted">${icono("ubicacion")}</span>` : "";
-    return `<div class="habito ${est ? "hecho" : ""}" data-habito="${esc(h.id)}">
-    <button class="check ${est}" data-accion="marcar" data-id="${esc(h.id)}" aria-label="${esc(h.nombre)}: ${est ? "quitar la marca" : "marcar como hecho"}">${ic}</button>
-    <div class="info"><div class="nombre">${esc(h.nombre)}${h.cuenta === false ? ' <span class="insignia">sin presión</span>' : ""}</div><div class="detalle">${esc(detalle)}</div></div>
-    <button class="mas" data-accion="opciones" data-id="${esc(h.id)}" aria-label="Más opciones de ${esc(h.nombre)}">${icono("puntos")}</button>
-  </div>`;
-  }
-  function tarjetaHabitos(lista2, c, prog) {
-    const pct = prog.total ? Math.round(100 * prog.hechos / prog.total) : 0;
-    return `<section class="tarjeta" data-hoy-habitos>
-    <div class="fila entre"><h2>Hoy</h2>${prog.total ? `<span class="muted" data-progreso>${prog.hechos} de ${prog.total}</span>` : ""}</div>
-    ${prog.total ? `<div class="progreso" aria-hidden="true"><span style="width:${pct}%"></span></div>` : ""}
-    <div class="lista">${lista2.map((h) => filaHabito(h, c)).join("")}</div>
-  </section>`;
-  }
-  function tarjetaTareas(ts) {
-    return `<section class="tarjeta"><h2>Para hoy</h2><div class="lista">${ts.map((t) => `<div class="habito">
-    <button class="check" data-accion="tarea" data-id="${esc(t.id)}" aria-label="Hecha: ${esc(t.titulo)}"></button>
-    <div class="info"><div class="nombre">${esc(t.titulo)}</div></div></div>`).join("")}</div></section>`;
-  }
-  function planJV(c, ds, hora) {
-    if (!(ds === 3 || ds === 4) || hora < 16 || !c.ajustes.planJV) return "";
-    const d = c.dias.find((x) => x.fecha === c.fecha);
-    return `<section class="tarjeta aviso col"><span class="etiqueta">Plan para esta noche</span>
-    <p>Si me entran ganas esta noche, entonces…</p>
-    <textarea name="plan" rows="2" placeholder="Por ejemplo: llamo a alguien y salgo a andar 10 minutos">${esc(d && d.plan || c.ajustes.planJVTexto || "")}</textarea>
-    <button class="boton peq" data-accion="guardar-plan">Guardar el plan</button></section>`;
-  }
-  function tarjetaEvento(ev, f) {
-    const d = fechaDeTs(ev.inicio);
-    const cuando = d === f ? "Hoy" : d === sumarDias(f, 1) ? "Mañana" : fechaCorta(d);
-    return `<section class="tarjeta suave fila"><span class="icono-medio">${icono("calendario")}</span>
-    <div class="crece"><span class="etiqueta">Próximo en la agenda</span><div>${esc(ev.titulo)}</div><div class="muted pequeno">${cuando} · ${horaMin(ev.inicio)}</div></div></section>`;
-  }
-  function elegirArranque(fecha) {
-    abrirHoja(`<h2>¿Con qué empiezas?</h2>
-    <p class="muted">Dos minutos. Si luego sigues, bien. Si no, también cuenta.</p>
-    <div class="col">
-      <button class="boton ancho" data-arr="ducha">${icono("ducha")} Ducha y ropa cómoda</button>
-      <button class="boton ancho" data-arr="leer">${icono("lectura")} Leer 2 minutos</button>
-      <button class="boton ancho" data-arr="ordenar">${icono("orden")} Ordenar 2 minutos</button>
-      <button class="boton ancho" data-arr="andar">${icono("andar")} Salir a andar</button>
-      <button class="boton ancho" data-arr="otra">Otra cosa</button>
-    </div>`, (c, cerrar) => {
-      c.addEventListener("click", (e) => {
-        const b = e.target.closest("[data-arr]");
-        if (!b) return;
-        cerrar();
-        guardarDia(fecha, { tarde: "arrancada", tarde_ts: (/* @__PURE__ */ new Date()).toISOString() });
-        const k = b.dataset.arr;
-        if (k === "leer" || k === "ordenar") empezarTemporizador({ tipo: "libre", minutos: 2, titulo: k === "leer" ? "Leer" : "Ordenar", subtitulo: "2 minutos" });
-        else aviso("Tarde arrancada");
-      });
-    });
-  }
-  function pintar(el2) {
-    const c = contexto();
-    const f = c.fecha;
-    const p = c.perfil;
-    const n = p && p.inicio ? diaN(p.inicio, f) : 1;
-    const ds = diaSemana(f);
-    const hora = (/* @__PURE__ */ new Date()).getHours();
-    const jv = (ds === 3 || ds === 4) && hora >= 16;
-    const propuesta = !c.fases.length && !c.habitos.length && !c.ajustes.fase1Descartada;
-    app.vistaEstable = propuesta;
-    const tarde = tardeDe(c);
-    const sig = loSiguiente({ habitos: c.habitos, indice: c.indice, fecha: f, ahoraMs: c.ahoraMs, marcas: c.marcas, eventos: c.eventos, tarde, umbralSeguimientoMs: msMin(20) });
-    const lista2 = habitosDelDia(c.habitos, f);
-    const prog = progresoDia(c.habitos, c.indice, f);
-    const ev = proximoEvento(c.eventos, c.ahoraMs);
-    const sinRevisar = c.movimientos.filter((m) => Number(m.importe) < 0 && !m.etiqueta).length;
-    const tareasHoy = c.tareas.filter((t) => !t.hecha && t.fecha === f);
-    el2.innerHTML = `<div class="pantalla">
-    <header class="cabecera"><span class="etiqueta">${esc(textoDia(n))}</span><h1>${esc(fechaLarga(f))}</h1></header>
-    <p class="frase">${esc(fraseDelDia(f))}</p>
-    ${propuesta ? tarjetaFase1() : tarjetaSiguiente(sig)}
-    ${lista2.length ? tarjetaHabitos(lista2, c, prog) : ""}
-    ${tareasHoy.length ? tarjetaTareas(tareasHoy) : ""}
-    ${planJV(c, ds, hora)}
-    ${ev && !(sig.tipo === "evento" && sig.evento.id === ev.id) ? tarjetaEvento(ev, f) : ""}
-    <button class="boton ancho ${jv ? "aviso ganas-grande" : "suave"}" data-accion="ganas">${icono("ganas")} Tengo ganas</button>
-    <div class="acciones-rapidas">
-      <button class="boton" data-accion="diario">${icono("diario")}<span>Diario</span></button>
-      <button class="boton" data-accion="apuntar">${icono("apuntar")}<span>Apuntar</span></button>
-      <button class="boton" data-accion="gastos">${icono("gastos")}<span>Gastos${sinRevisar ? ` · ${sinRevisar}` : ""}</span></button>
-    </div>
-    ${lineaSync()}
-  </div>`;
-    el2.onclick = (e) => {
-      const b = e.target.closest("[data-accion]");
-      if (!b) return;
-      const a = b.dataset.accion;
-      const id = b.dataset.id;
-      const h = id ? una2("habitos", id) : null;
-      if (a === "marcar" && h) marcarRapido(h, f);
-      else if (a === "opciones" && h) opcionesHabito(h, f);
-      else if (a === "empezar" && h) empezarHabito(h);
-      else if (a === "minimo" && h) empezarHabito(h, { minimo: true });
-      else if (a === "tarde-arrancar") elegirArranque(f);
-      else if (a === "tarde-descanso") {
-        guardarDia(f, { tarde: "descanso", tarde_ts: (/* @__PURE__ */ new Date()).toISOString() });
-        aviso("Apuntado: tarde de descanso");
-      } else if (a === "seguimiento") location.hash = `#/ganas/${id}/seguimiento`;
-      else if (a === "completar-marca") location.hash = `#/ganas/${id}`;
-      else if (a === "ganas") location.hash = "#/ganas";
-      else if (a === "diario") location.hash = "#/diario";
-      else if (a === "apuntar") abrirApuntar();
-      else if (a === "gastos") location.hash = "#/espacio/finanzas";
-      else if (a === "tarea") {
-        const t = una2("tareas", id);
-        if (t) {
-          guardar("tareas", { ...t, hecha: true });
-          aviso("Tarea hecha", { accion: "Deshacer", alPulsar: () => guardar("tareas", { ...t, hecha: false }) });
-        }
-      } else if (a === "guardar-plan") {
-        const ta = el2.querySelector("textarea[name=plan]");
-        guardarDia(f, { plan: ta.value.trim() || null });
-        ta.blur();
-        aviso("Plan guardado");
-      } else if (a === "aprobar-fase1") {
-        const card = b.closest("[data-fase1]");
-        const q = (nombre) => card.querySelector(`[name=${nombre}]`);
-        if (!q("agua").checked && !q("meditacion").checked && !q("diario").checked) {
-          aviso("Elige al menos una");
-          return;
-        }
-        try {
-          crearFase1({ hora: q("hora").value || "06:00", agua: q("agua").checked, meditacion: q("meditacion").checked, diario: q("diario").checked });
-          aviso("Fase 1 en marcha. Hoy es el día 1.");
-          pintar(el2);
-        } catch (x) {
-          aviso(x.message);
-        }
-      } else if (a === "descartar-fase1") {
-        try {
-          guardarAjustes({ fase1Descartada: true });
-        } catch (_) {
-        }
-        location.hash = "#/habitos";
+  async function datosDe(m) {
+    if (memoria.has(m.id)) return memoria.get(m.id);
+    const ya = yaDescifrado(m.cifrado);
+    if (ya) return ya;
+    if (m.cifrado && desbloqueado()) {
+      try {
+        return await descifrar2(m.cifrado);
+      } catch (_) {
+        return null;
       }
-    };
-  }
-
-  // ../365/js/vistas/habitos.js
-  var habitos_exports = {};
-  __export(habitos_exports, {
-    pintar: () => pintar2
-  });
-  var SIGUIENTES = [
-    { nombre: "Lectura y pantallas", objetivo: "Leer 10 minutos por la tarde y bajar redes.", plantillas: ["lectura"] },
-    { nombre: "Casa y comida", objetivo: "Un poco de orden cada semana y comer algo mejor.", plantillas: ["orden"] }
-  ];
-  function mensajeFase(ev) {
-    if (ev.estado === "estable") return "Tres semanas seguidas por encima del 80 %. Está saliendo casi solo. ¿Lo consolidamos y piensas en la siguiente fase?";
-    if (ev.estado === "atascada") {
-      const a = ev.atascados[0];
-      return `«${a.habito.nombre}» cuesta: ${a.hechos} de ${a.previstos} días en las dos últimas semanas. No es falta de voluntad, algo frena el inicio. ¿Probamos la versión mínima, otra hora o una pausa?`;
     }
-    if (ev.estado === "vacia") return "Esta fase no tiene hábitos activos.";
-    return "En marcha. La fase avanza cuando lo de ahora sale casi solo, no por calendario.";
+    return null;
   }
-  function tarjetaFase(fase, c) {
-    const ev = evaluarFase(fase, c.habitos, c.indice, c.fecha);
-    const pospuesta = fase.evaluacion && fase.evaluacion.startsWith("seguir:") && fase.evaluacion.slice(7) > c.fecha;
-    let botones = "";
-    if (!pospuesta && ev.estado === "estable") botones = '<button class="boton principal" data-accion="consolidar">Consolidar</button><button class="boton suave" data-accion="seguir">Seguir así</button>';
-    if (!pospuesta && ev.estado === "atascada") botones = `<button class="boton principal" data-accion="ajustar" data-id="${esc(ev.atascados[0].habito.id)}">Ajustar «${esc(ev.atascados[0].habito.nombre)}»</button><button class="boton suave" data-accion="seguir">Seguir así</button>`;
-    const hs = c.habitos.filter((h) => h.fase_id === fase.id && h.estado !== "finalizado");
-    return `<section class="tarjeta destacada col">
-    <span class="etiqueta">Fase activa · semana ${ev.semana || 1} · desde el ${esc(fechaCorta(fase.inicio || c.fecha))}</span>
-    <h2>${esc(fase.nombre)}</h2>
-    ${fase.objetivo ? `<p class="muted">${esc(fase.objetivo)}</p>` : ""}
-    <p>${esc(pospuesta ? "Revisada. Te vuelvo a proponer en unos días." : mensajeFase(ev))}</p>
-    ${hs.length ? `<p class="pequeno muted">${hs.map((h) => esc(h.nombre)).join(" · ")}</p>` : ""}
-    ${botones ? `<div class="botones">${botones}</div>` : ""}
-  </section>`;
+  async function guardarInicio(m, datos2) {
+    const id = m ? m.id : uuid();
+    const ts = m ? m.ts : (/* @__PURE__ */ new Date()).toISOString();
+    const inicio = { ...datos2, lugar: ultimoLugar(tsMs(ts)), opciones: [], nota: null };
+    memoria.set(id, inicio);
+    let cifrado = null;
+    try {
+      cifrado = await cifrar2(inicio);
+    } catch (x) {
+      aviso(x.message);
+    }
+    guardar("marcas", { ...m || {}, id, ts, cifrado, cierre: m ? m.cierre || null : null, abierta: true, origen: m ? m.origen : "app" });
+    return id;
   }
-  function filaLista(h, c) {
-    const desde = sumarDias(c.fecha, -28);
-    const ayer = sumarDias(c.fecha, -1);
-    const cu = cumplimiento(h, c.indice, h.inicio && h.inicio > desde ? h.inicio : desde, hastaCon(h, c.indice, c.fecha));
-    const det = [diasTexto(h.dias), h.hora, h.duracion_min ? minutosTexto(h.duracion_min) : null].filter(Boolean).join(" · ");
-    const etiqueta = h.estado === "pausado" ? "Pausado" : cu.pct == null ? "Nuevo" : `${cu.hechos} de ${cu.previstos}`;
-    return `<a class="habito" href="#/habitos/${encodeURIComponent(h.id)}">
-    <div class="info"><div class="nombre">${esc(h.nombre)}</div><div class="detalle">${esc(det)}</div></div>
-    <span class="insignia">${esc(etiqueta)}</span>
-  </a>`;
+  async function actualizarInicio(m, cambio) {
+    const d = await datosDe(m);
+    if (!d) return;
+    const nuevo = cambio(d);
+    memoria.set(m.id, nuevo);
+    try {
+      const cifrado = await cifrar2(nuevo);
+      const actual = una2("marcas", m.id) || m;
+      guardar("marcas", { ...actual, cifrado });
+    } catch (_) {
+    }
   }
-  function pintarLista(el2) {
-    const c = contexto();
-    const fase = c.faseActiva;
-    const vivos = c.habitos.filter((h) => h.estado !== "finalizado");
-    const finalizados = c.habitos.filter((h) => h.estado === "finalizado");
-    const grupos = AREAS.map((a) => ({ a, hs: ordenarHabitos(vivos.filter((h) => h.area === a.id)) })).filter((g) => g.hs.length);
-    const otros = vivos.filter((h) => !AREAS.some((a) => a.id === h.area));
-    if (otros.length) grupos.push({ a: { nombre: "Otros" }, hs: otros });
-    const anteriores = c.fases.filter((f) => f.estado !== "activa").sort((a, b) => String(b.inicio).localeCompare(String(a.inicio)));
+  function pintarRegistro(el2, m) {
+    const st = { intensidad: null, contexto: /* @__PURE__ */ new Set() };
     el2.innerHTML = `<div class="pantalla">
-    <header class="cabecera fila entre"><h1>Hábitos</h1><button class="boton peq principal" data-accion="nuevo">${icono("mas")} Añadir</button></header>
-    ${fase ? tarjetaFase(fase, c) : `<section class="tarjeta suave col"><h2>Sin fase activa</h2>
-      <p class="muted">Una fase es un grupo pequeño de hábitos que se trabaja junto hasta que sale casi solo.</p>
-      <button class="boton principal" data-accion="nueva-fase">Empezar una fase</button></section>`}
-    ${grupos.length ? grupos.map((g) => `<section class="tarjeta"><span class="etiqueta">${esc(g.a.nombre)}</span><div class="lista">${g.hs.map((h) => filaLista(h, c)).join("")}</div></section>`).join("") : '<p class="muted centro">Aún no hay hábitos. Empieza por uno pequeño.</p>'}
-    <p class="muted pequeno">El número es cuántos días lo hiciste de los que tocaban en las últimas 4 semanas. Un día sin hacer no borra nada.</p>
-    ${finalizados.length ? `<details class="tarjeta suave"><summary>Finalizados (${finalizados.length})</summary><div class="lista">${finalizados.map((h) => filaLista(h, c)).join("")}</div></details>` : ""}
-    ${anteriores.length ? `<details class="tarjeta suave"><summary>Fases anteriores (${anteriores.length})</summary>${anteriores.map((f) => `<p><b>${esc(f.nombre)}</b> <span class="muted pequeno">${esc(fechaCorta(f.inicio || c.fecha))}${f.fin ? ` a ${esc(fechaCorta(f.fin))}` : ""} · ${esc(f.estado)}</span></p>`).join("")}</details>` : ""}
+    <a class="enlace" href="#/hoy">${icono("atras")} Hoy</a>
+    <header class="cabecera"><h1>${m ? `Momento de las ${esc(horaMin(m.ts))}` : "Tengo ganas"}</h1><p class="muted">Apúntalo y elige qué hacer. Las ganas suben y bajan.</p></header>
+    <span class="etiqueta">¿Cuántas? Del 1 al 10</span>
+    <div class="intensidad">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `<button type="button" data-int="${n}">${n}</button>`).join("")}</div>
+    <span class="etiqueta">¿Qué hay detrás? (opcional)</span>
+    <div class="chips">${CONTEXTOS.map((c) => `<button type="button" class="chip" data-ctx="${esc(c)}">${esc(c)}</button>`).join("")}</div>
+    <button class="boton principal ancho" data-guardar disabled>Guardar y ver opciones</button>
+    <button class="enlace" data-solo>Solo apuntar la hora y ver opciones</button>
   </div>`;
     el2.onclick = async (e) => {
-      const b = e.target.closest("[data-accion]");
-      if (!b) return;
-      const a = b.dataset.accion;
-      if (a === "nuevo") editarHabito(null);
-      else if (a === "nueva-fase") nuevaFase();
-      else if (a === "ajustar") {
-        const h = una2("habitos", b.dataset.id);
-        if (h) editarHabito(h);
-      } else if (a === "seguir" && fase) {
-        guardar("fases", { ...fase, evaluacion: `seguir:${sumarDias(c.fecha, 7)}` });
-        aviso("Seguimos así");
-      } else if (a === "consolidar" && fase) {
-        if (!await confirmar2({ titulo: `¿Consolidar «${fase.nombre}»?`, texto: "Los hábitos siguen activos. La fase queda como conseguida y puedes empezar otra.", si: "Consolidar" })) return;
-        guardar("fases", { ...fase, estado: "consolidada", fin: c.fecha, evaluacion: "Estable: 80 % o más durante 3 semanas" });
-        nuevaFase();
+      const i = e.target.closest("[data-int]");
+      if (i) {
+        st.intensidad = Number(i.dataset.int);
+        el2.querySelectorAll("[data-int]").forEach((b) => b.classList.toggle("on", b === i));
+        el2.querySelector("[data-guardar]").disabled = false;
+        return;
+      }
+      const c = e.target.closest("[data-ctx]");
+      if (c) {
+        const k = c.dataset.ctx;
+        if (st.contexto.has(k)) st.contexto.delete(k);
+        else st.contexto.add(k);
+        c.classList.toggle("activo", st.contexto.has(k));
+        return;
+      }
+      const g = e.target.closest("[data-guardar]");
+      const s = e.target.closest("[data-solo]");
+      if (g || s) {
+        if (g) g.disabled = true;
+        const id = await guardarInicio(m, s ? { intensidad: null, contexto: [] } : { intensidad: st.intensidad, contexto: [...st.contexto] });
+        location.hash = `#/ganas/${id}/opciones`;
       }
     };
   }
-  function nuevaFase() {
-    const activa = todas2("fases").find((f) => f.estado === "activa");
-    abrirHoja(`<h2>Nueva fase</h2>
-    ${activa ? `<p class="tarjeta aviso pequeno">Ya tienes «${esc(activa.nombre)}» activa. Al empezar otra, esa queda cerrada.</p>` : ""}
-    <div class="chips">${SIGUIENTES.map((s, i) => `<button type="button" class="chip" data-sug="${i}">${esc(s.nombre)}</button>`).join("")}</div>
-    <form class="col" data-fase>
-      <label class="campo">Nombre<input type="text" name="nombre" maxlength="60" required></label>
-      <label class="campo">Objetivo<input type="text" name="objetivo" maxlength="140"></label>
-      <span class="etiqueta">Hábitos para empezar (puedes añadir más luego)</span>
-      ${PLANTILLAS.filter((p) => p.clave !== "gimnasio").map((p) => `<label class="interruptor"><span>${esc(p.nombre)}</span><input type="checkbox" name="p-${p.clave}"></label>`).join("")}
-      <p class="error pequeno" role="alert"></p>
-      <button class="boton principal ancho" type="submit">Empezar la fase</button>
-    </form>`, (c, cerrar) => {
-      const f = c.querySelector("[data-fase]");
-      c.addEventListener("click", (e) => {
-        const s = e.target.closest("[data-sug]");
-        if (!s) return;
-        const sug = SIGUIENTES[Number(s.dataset.sug)];
-        f.nombre.value = sug.nombre;
-        f.objetivo.value = sug.objetivo;
-        PLANTILLAS.forEach((p) => {
-          const cb = f[`p-${p.clave}`];
-          if (cb) cb.checked = sug.plantillas.includes(p.clave);
-        });
-      });
-      f.onsubmit = (e) => {
-        e.preventDefault();
-        const nombre = f.nombre.value.trim();
-        if (!nombre) {
-          f.querySelector(".error").textContent = "Ponle un nombre.";
-          return;
-        }
-        const fecha = hoy();
-        if (activa) guardar("fases", { ...activa, estado: "cerrada", fin: fecha });
-        const fase = guardar("fases", { id: uuid(), nombre, objetivo: f.objetivo.value.trim() || null, inicio: fecha, fin: null, semanas: 4, estado: "activa", evaluacion: null });
-        let orden = todas2("habitos").length;
-        for (const p of PLANTILLAS) {
-          const cb = f[`p-${p.clave}`];
-          if (!cb || !cb.checked) continue;
-          const { clave: clave2, ...datos } = p;
-          guardar("habitos", { ...datos, id: uuid(), auto: datos.auto || null, hora: datos.hora || null, estado: "activo", inicio: fecha, fase_id: fase.id, orden: orden++ });
-        }
+  function escribirlo(m) {
+    abrirHoja(`<h2>Escríbelo</h2><p class="muted pequeno">Qué sientes, qué ha pasado. Toca el micrófono del teclado si prefieres hablar.</p>
+    <textarea name="nota" rows="5"></textarea><button class="boton principal ancho" data-ok>Guardar</button>`, (c, cerrar) => {
+      const ta = c.querySelector("textarea");
+      ta.focus();
+      c.querySelector("[data-ok]").onclick = async () => {
+        const txt = ta.value.trim();
         cerrar();
-        aviso(`Fase «${nombre}» en marcha`);
+        if (!txt) return;
+        await actualizarInicio(m, (d) => ({ ...d, nota: d.nota ? `${d.nota}
+
+${txt}` : txt }));
+        aviso("Guardado y cifrado");
       };
     });
   }
-  function calendario(h, indice, fecha) {
-    const lunes = lunesDe(fecha);
-    const ini = sumarDias(lunes, -7 * 7);
-    let celdas = "";
-    for (let s = 0; s < 8; s++) {
-      for (let d = 0; d < 7; d++) {
-        const f = sumarDias(ini, s * 7 + d);
-        let cls = "f";
-        let t = "";
-        if (f <= fecha && previstoEn(h, f)) {
-          const r = indice.get(`${h.id}|${f}`);
-          cls = !r ? "p" : r.estado === "hecho" ? "h" : r.estado === "minimo" ? "m" : "x";
-          t = !r ? "sin marcar" : r.estado === "hecho" ? "hecho" : r.estado === "minimo" ? "mínimo" : "no";
-        }
-        celdas += `<span class="${cls}" style="grid-row:${d + 1};grid-column:${s + 1}" title="${f}${t ? `: ${t}` : ""}"></span>`;
-      }
-    }
-    return `<div class="cal-habito">${DIAS_CORTOS.map((x, i) => `<b style="grid-row:${i + 1};grid-column:9">${x}</b>`).join("")}${celdas}</div>
-    <div class="leyenda pequeno muted"><span><i class="h"></i>Hecho</span><span><i class="m"></i>Mínimo</span><span><i class="x"></i>No</span><span><i class="p"></i>Sin marcar</span></div>`;
+  function verRazones(razones) {
+    abrirHoja(`<h2>Mis razones</h2>${razones.map((r) => `<p class="razon">${esc(r)}</p>`).join("")}<button class="boton ancho" data-cerrar>Cerrar</button>`);
   }
-  function pintarDetalle(el2, id) {
-    const h = una2("habitos", id);
-    if (!h) {
-      location.hash = "#/habitos";
-      return;
-    }
-    const c = contexto();
-    const ayer = sumarDias(c.fecha, -1);
-    const d28 = sumarDias(c.fecha, -28);
-    const hasta = hastaCon(h, c.indice, c.fecha);
-    const c28 = cumplimiento(h, c.indice, h.inicio && h.inicio > d28 ? h.inicio : d28, hasta);
-    const total = cumplimiento(h, c.indice, h.inicio || d28, hasta);
-    const fase = h.fase_id ? una2("fases", h.fase_id) : null;
-    const pct = c28.pct || 0;
-    const autoTxt = { diario: "al escribir el diario", gimnasio: "al llegar al gimnasio", madre: "al llegar a casa de tu madre", trabajo: "al llegar al trabajo", casa: "al llegar a casa" }[h.auto];
-    const dato = (k, v) => v ? `<div class="fila entre"><span class="muted">${k}</span><span>${esc(v)}</span></div>` : "";
+  function pintarOpciones(el2, m) {
+    const a = ajustes();
+    const contactos = (a.contactos || []).filter((c) => c && c.nombre && c.tel);
+    const razones = (a.razones || []).filter(Boolean);
+    const ayuda = a.ayuda && a.ayuda.tel ? a.ayuda : null;
+    const espera = a.esperaMin || 15;
     el2.innerHTML = `<div class="pantalla">
-    <a class="enlace" href="#/habitos">${icono("atras")} Hábitos</a>
-    <header class="cabecera"><span class="etiqueta">${esc(nombreArea(h.area))}${h.estado !== "activo" ? ` · ${esc(h.estado)}` : ""}</span><h1>${esc(h.nombre)}</h1>
-      <p class="muted">${esc([diasTexto(h.dias), h.hora || "sin hora", h.duracion_min ? minutosTexto(h.duracion_min) : null].filter(Boolean).join(" · "))}</p></header>
-    <section class="tarjeta col">
-      <div class="fila entre"><span>Últimas 4 semanas</span><b>${c28.previstos ? `${c28.hechos} de ${c28.previstos} días` : "Aún sin días"}</b></div>
-      <div class="progreso" aria-hidden="true"><span style="width:${pct}%"></span></div>
-      <div class="fila entre muted pequeno"><span>Desde que empezó</span><span>${total.hechos} de ${total.previstos}${total.minimos ? ` · ${total.minimos} en versión mínima` : ""}</span></div>
-    </section>
-    <section class="tarjeta col"><span class="etiqueta">Últimas 8 semanas</span>${calendario(h, c.indice, c.fecha)}</section>
-    <section class="tarjeta col">
-      ${dato("Versión mínima", h.minimo)}${dato("Para qué", h.objetivo)}${dato("Empezó", h.inicio ? fechaCorta(h.inicio) : "")}
-      ${dato("Fase", fase ? fase.nombre : "")}${dato("Se apunta solo", autoTxt || "")}${dato("Temporizador", h.temporizador ? "Sí" : "")}${dato("Cuenta en el día", h.cuenta === false ? "No, sin presión" : "Sí")}
-    </section>
-    <button class="boton ancho" data-accion="hoy-marcar">Marcar hoy</button>
-    <div class="botones"><button class="boton" data-accion="editar">Editar</button><button class="boton" data-accion="pausar">${h.estado === "pausado" ? "Reanudar" : "Pausar"}</button></div>
-    <div class="botones"><button class="boton" data-accion="finalizar">${h.estado === "finalizado" ? "Reactivar" : "Finalizar"}</button><button class="boton peligro" data-accion="eliminar">Eliminar</button></div>
+    <a class="enlace" href="#/hoy">${icono("atras")} Hoy</a>
+    <header class="cabecera"><h1>¿Qué hacemos ahora?</h1><p class="muted">Si no se alimentan, suelen bajar en menos de media hora. Elige una cosa.</p></header>
+    <div class="col">
+      ${contactos.map((c, i) => `<a class="boton ancho" href="tel:${esc(limpiarTel(c.tel))}" data-op="llamar" data-i="${i}">${icono("telefono")} Llamar a ${esc(c.nombre)}</a>
+        <a class="boton ancho" href="${esc(enlaceWhatsApp(c))}" target="_blank" rel="noopener" data-op="escribir" data-i="${i}">${icono("mensaje")} Escribir a ${esc(c.nombre)}</a>`).join("")}
+      <button class="boton ancho principal" data-op="respirar">${icono("respirar")} Esperar ${espera} min respirando</button>
+      <button class="boton ancho" data-op="andar">${icono("andar")} Andar 10 minutos</button>
+      <button class="boton ancho" data-op="ducha">${icono("ducha")} Darme una ducha</button>
+      <button class="boton ancho" data-op="comer">${icono("comer")} Comer algo</button>
+      <button class="boton ancho" data-op="escribirlo">${icono("escribir")} Escribirlo</button>
+      ${razones.length ? `<button class="boton ancho" data-op="razones">${icono("razones")} Ver mis razones</button>` : ""}
+      ${ayuda ? `<a class="boton ancho" href="tel:${esc(limpiarTel(ayuda.tel))}" data-op="ayuda">${icono("ayuda")} ${esc(ayuda.nombre || "Ayuda profesional")}</a>` : ""}
+    </div>
+    ${!contactos.length ? '<a class="enlace" href="#/espacio/ajustes/ganas">Añadir personas de apoyo y tus razones</a>' : ""}
+    <button class="boton ancho suave" data-op="volver">Ya está, volver</button>
+    <p class="muted pequeno centro">A los 20 minutos, en HOY, te pregunto cómo van.</p>
+  </div>`;
+    el2.onclick = (e) => {
+      const b = e.target.closest("[data-op]");
+      if (!b) return;
+      const op = b.dataset.op;
+      if (op !== "volver") actualizarInicio(m, (d) => ({ ...d, opciones: [...d.opciones || [], { op, ts: (/* @__PURE__ */ new Date()).toISOString() }] }));
+      if (op === "respirar") empezarTemporizador({ tipo: "ganas", marca_id: m.id, minutos: espera, titulo: "Respira", subtitulo: "Las ganas suben y bajan", respiracion: true });
+      else if (op === "andar") empezarTemporizador({ tipo: "ganas", marca_id: m.id, minutos: 10, titulo: "Andar", subtitulo: "10 minutos fuera" });
+      else if (op === "ducha" || op === "comer") {
+        aviso("Apuntado. Luego te pregunto cómo van.");
+        location.hash = "#/hoy";
+      } else if (op === "escribirlo") escribirlo(m);
+      else if (op === "razones") verRazones(razones);
+      else if (op === "volver") location.hash = "#/hoy";
+    };
+  }
+  async function pintarSeguimiento(el2, m) {
+    const d = await datosDe(m);
+    const st = { intensidad: null, resultado: null, ayudo: /* @__PURE__ */ new Set() };
+    const usadas = d && d.opciones ? d.opciones.map((o) => o.op) : [];
+    const chips = [.../* @__PURE__ */ new Set([...usadas, "respirar", "llamar", "escribir", "andar", "ducha", "comer", "escribirlo", "razones"])].filter((k) => OPCIONES[k]);
+    el2.innerHTML = `<div class="pantalla">
+    <a class="enlace" href="#/hoy">${icono("atras")} Hoy</a>
+    <header class="cabecera"><h1>¿Cómo van?</h1><p class="muted">Desde las ${esc(horaMin(m.ts))}${d && d.intensidad ? ` · antes: ${d.intensidad} de 10` : ""}</p></header>
+    <span class="etiqueta">Ahora, del 0 al 10</span>
+    <div class="intensidad seis">${[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `<button type="button" data-int="${n}">${n}</button>`).join("")}</div>
+    <span class="etiqueta">¿Qué ha pasado?</span>
+    <div class="segmentos">${Object.entries(RESULTADOS).map(([k, t]) => `<button type="button" data-res="${k}">${t}</button>`).join("")}</div>
+    <span class="etiqueta">¿Qué ayudó? (opcional)</span>
+    <div class="chips">${chips.map((k) => `<button type="button" class="chip" data-ay="${k}">${esc(OPCIONES[k])}</button>`).join("")}<button type="button" class="chip" data-ay="nada">Nada en especial</button></div>
+    <button class="boton principal ancho" data-guardar disabled>Guardar</button>
   </div>`;
     el2.onclick = async (e) => {
-      const b = e.target.closest("[data-accion]");
-      if (!b) return;
-      const a = b.dataset.accion;
-      if (a === "editar") editarHabito(h);
-      else if (a === "hoy-marcar") opcionesHabito(h, c.fecha);
-      else if (a === "pausar") {
-        guardar("habitos", { ...h, estado: h.estado === "pausado" ? "activo" : "pausado" });
-        aviso(h.estado === "pausado" ? "Reanudado" : "En pausa. No sale en HOY hasta que lo reanudes.");
-      } else if (a === "finalizar") {
-        if (h.estado === "finalizado") {
-          guardar("habitos", { ...h, estado: "activo" });
-          aviso("Reactivado");
-          return;
-        }
-        if (await confirmar2({ titulo: `¿Finalizar «${h.nombre}»?`, texto: "Deja de salir en HOY. El historial se queda.", si: "Finalizar" })) {
-          guardar("habitos", { ...h, estado: "finalizado" });
-          aviso("Finalizado");
-        }
-      } else if (a === "eliminar") {
-        if (await eliminarHabito(h)) location.hash = "#/habitos";
+      const i = e.target.closest("[data-int]");
+      if (i) {
+        st.intensidad = Number(i.dataset.int);
+        el2.querySelectorAll("[data-int]").forEach((b) => b.classList.toggle("on", b === i));
+        return;
+      }
+      const r = e.target.closest("[data-res]");
+      if (r) {
+        st.resultado = r.dataset.res;
+        el2.querySelectorAll("[data-res]").forEach((b) => b.classList.toggle("on", b === r));
+        el2.querySelector("[data-guardar]").disabled = false;
+        return;
+      }
+      const y = e.target.closest("[data-ay]");
+      if (y) {
+        const k = y.dataset.ay;
+        if (st.ayudo.has(k)) st.ayudo.delete(k);
+        else st.ayudo.add(k);
+        y.classList.toggle("activo", st.ayudo.has(k));
+        return;
+      }
+      const g = e.target.closest("[data-guardar]");
+      if (!g || !st.resultado) return;
+      g.disabled = true;
+      let cierre = null;
+      try {
+        cierre = await cifrar2({ ts: (/* @__PURE__ */ new Date()).toISOString(), intensidad: st.intensidad, resultado: st.resultado, ayudo: [...st.ayudo] });
+      } catch (x) {
+        aviso(x.message);
+        g.disabled = false;
+        return;
+      }
+      const actual = una2("marcas", m.id) || m;
+      guardar("marcas", { ...actual, cierre, abierta: false });
+      if (st.resultado === "siguen") {
+        aviso("Apuntado. Probemos otra cosa.");
+        location.hash = `#/ganas/${m.id}/opciones`;
+      } else if (st.resultado === "consumi") {
+        el2.innerHTML = `<div class="pantalla"><header class="cabecera"><h1>Apuntado</h1></header>
+        <p>No se reinicia nada. Lo que llevas hecho sigue ahí.</p>
+        <p class="muted">Cuando estés con calma, escribir qué pasó ayuda a preparar la próxima vez.</p>
+        <a class="boton principal ancho" href="#/hoy">Volver a Hoy</a>
+        <a class="boton ancho" href="#/diario/escribir/libre">${icono("escribir")} Escribirlo ahora</a></div>`;
+      } else {
+        aviso("Apuntado");
+        location.hash = "#/hoy";
       }
     };
   }
-  function pintar2(el2, partes) {
-    if (partes[0]) pintarDetalle(el2, decodeURIComponent(partes[0]));
-    else pintarLista(el2);
+  function pintar(el2, partes) {
+    app.vistaEstable = true;
+    document.body.classList.add("sin-tabs");
+    const [id, paso] = partes;
+    if (!id) {
+      pintarRegistro(el2, null);
+      return;
+    }
+    const m = una2("marcas", decodeURIComponent(id));
+    if (!m) {
+      location.hash = "#/hoy";
+      return;
+    }
+    if (paso === "seguimiento") pintarSeguimiento(el2, m);
+    else if (paso === "opciones" || m.cifrado) pintarOpciones(el2, m);
+    else pintarRegistro(el2, m);
+  }
+  var nivel = (n, max) => !n ? "" : n <= max / 3 ? "n1" : n <= 2 * max / 3 ? "n2" : "n3";
+  var lista = (pares, nombres = null) => pares.slice(0, 4).map(([k, n]) => `<div class="fila entre"><span>${esc(nombres ? nombres[k] || k : k)}</span><b>${n}</b></div>`).join("") || '<p class="muted pequeno">Aún sin datos.</p>';
+  async function pintarModulo(el2) {
+    const c = contexto();
+    const marcas = [...c.marcas].sort((a, b) => tsMs(b.ts) - tsMs(a.ts));
+    const semanas = ganasPorSemana(marcas, c.fecha, 8);
+    const max = Math.max(1, ...semanas.map((s) => s.n));
+    const g = rejillaGanas(marcas);
+    const maxG = Math.max(1, ...g.flat());
+    const esta = semanas[semanas.length - 1].n;
+    const anterior = semanas[semanas.length - 2].n;
+    let detalles = "";
+    let recientes = marcas.slice(0, 12).map((m) => ({ m, d: null }));
+    if (desbloqueado()) {
+      const todos = [];
+      for (const m of marcas) {
+        let inicio = null;
+        let cierre = null;
+        try {
+          inicio = m.cifrado ? await descifrar2(m.cifrado) : null;
+        } catch (_) {
+          inicio = null;
+        }
+        try {
+          cierre = m.cierre ? await descifrar2(m.cierre) : null;
+        } catch (_) {
+          cierre = null;
+        }
+        todos.push({ m, d: { inicio, cierre } });
+      }
+      recientes = todos.slice(0, 12);
+      const p = patronesGanas(todos.map((x) => x.d));
+      detalles = `<section class="tarjeta col"><h2>Qué hay detrás</h2>${lista(p.contextos)}</section>
+      <section class="tarjeta col"><h2>Qué ayudó</h2>${lista(p.ayudo, OPCIONES)}</section>
+      <section class="tarjeta col"><h2>Cómo acabaron</h2>${lista(p.resultados, RESULTADOS)}
+        ${p.mediaAntes != null ? `<p class="muted pequeno">Intensidad media al empezar: ${p.mediaAntes}${p.mediaDespues != null ? ` · al rato: ${p.mediaDespues}` : ""}</p>` : ""}</section>`;
+    } else {
+      detalles = htmlDesbloqueo("Por qué aparecen y qué te ayuda está cifrado. Desbloquea para verlo.");
+    }
+    const fila2 = ({ m, d }) => {
+      const ini = d && d.inicio;
+      const fin = d && d.cierre;
+      const extra = ini || fin ? ` · ${ini && ini.intensidad ? `${ini.intensidad}/10` : ""}${fin ? ` → ${RESULTADOS[fin.resultado] || ""}` : ""}` : "";
+      return `<div class="fila entre"><span>${esc(fechaCorta(fechaDeTs(m.ts)))} · ${esc(horaMin(m.ts))}</span><span class="muted pequeno">${esc(extra.replace(/^ · /, ""))}</span></div>`;
+    };
+    el2.innerHTML = `<div class="pantalla">
+    <a class="enlace" href="#/espacio">${icono("atras")} Mi espacio</a>
+    <header class="cabecera"><h1>Ganas</h1><p class="muted">Privado. Nada se reinicia por un mal día.</p></header>
+    <a class="boton aviso ancho" href="#/ganas">${icono("ganas")} Tengo ganas</a>
+    <section class="tarjeta col"><div class="fila entre"><h2>Por semana</h2><span class="muted pequeno">Esta: ${esta} · la anterior: ${anterior}</span></div>
+      <div class="barras">${semanas.map((s) => `<div class="b aviso"><span style="height:${Math.round(100 * s.n / max)}%"></span><small>${s.ini.slice(8)}/${s.ini.slice(5, 7)}</small></div>`).join("")}</div></section>
+    <section class="tarjeta col"><h2>Cuándo aparecen</h2>
+      <div class="rejilla-ganas"><span></span>${DIAS_CORTOS.map((d) => `<b>${d}</b>`).join("")}${["Madrugada", "Mañana", "Tarde", "Noche"].map((fr, i) => `<span class="muted">${fr}</span>${g[i].map((n) => `<span class="c ${nivel(n, maxG)}" title="${n}"></span>`).join("")}`).join("")}</div></section>
+    ${detalles}
+    ${recientes.length ? `<section class="tarjeta col"><h2>Últimas veces</h2>${recientes.map(fila2).join("")}</section>` : ""}
+    <a class="boton ancho" href="#/espacio/ajustes/ganas">${icono("ajustes")} Personas de apoyo, razones y plan</a>
+  </div>`;
+    if (!desbloqueado()) montarDesbloqueo(el2, () => pintarModulo(el2));
+    else app.vistaEstable = true;
   }
 
   // ../365/js/vistas/diario.js
@@ -2796,7 +2868,7 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     descifrarFilas: () => descifrarFilas,
     guardarPendiente: () => guardarPendiente,
     htmlEntrada: () => htmlEntrada,
-    pintar: () => pintar3,
+    pintar: () => pintar2,
     pintarRelacion: () => pintarRelacion,
     preguntaInicial: () => preguntaInicial
   });
@@ -2861,9 +2933,9 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     const i = preg ? s.idx % preg.length : null;
     const p = preg ? preg[i] : null;
     const valor = preg ? s.respuestas[i] || "" : s.texto;
-    const volver = s.tipo === "relacion" ? "#/espacio/relacion" : "#/diario";
+    const volver2 = s.tipo === "relacion" ? "#/espacio/relacion" : "#/diario";
     el2.innerHTML = `<div class="pantalla escribir">
-    <div class="fila entre"><a class="enlace" href="${volver}" data-accion="salir">${icono("atras")} ${s.tipo === "relacion" ? "Relación" : "Diario"}</a><span class="etiqueta" data-estado-guardado>${s.guardado ? `Guardado ${horaMin(s.guardado)}` : ""}</span></div>
+    <div class="fila entre"><a class="enlace" href="${volver2}" data-accion="salir">${icono("atras")} ${s.tipo === "relacion" ? "Relación" : "Diario"}</a><span class="etiqueta" data-estado-guardado>${s.guardado ? `Guardado ${horaMin(s.guardado)}` : ""}</span></div>
     <span class="etiqueta">${TITULOS[s.tipo]}${preg ? ` · pregunta ${s.vistas} de ${preg.length}` : ""}</span>
     <h1 class="pregunta">${p ? esc(p) : s.tipo === "libre" ? "Escribe lo que quieras" : "Solo para ti"}</h1>
     <textarea class="grande" name="texto" placeholder="Escribe, o toca el micrófono del teclado y habla">${esc(valor)}</textarea>
@@ -3054,408 +3126,260 @@ details > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
     const entradas = await descifrarFilas(todas2("diario").filter((d) => d.tipo === "relacion"));
     el2.innerHTML = `<div class="pantalla">${cab}${entradas.length ? entradas.map(htmlEntrada).join("") : '<p class="muted centro">Aún no hay nada escrito.</p>'}</div>`;
   }
-  function pintar3(el2, partes) {
+  function pintar2(el2, partes) {
     if (partes[0] === "escribir") pintarEscribir(el2, partes[1] || "libre");
     else if (partes[0] === "revisar") pintarRevisar(el2);
     else pintarInicio(el2);
   }
 
-  // ../365/js/vistas/evolucion.js
-  var evolucion_exports = {};
-  __export(evolucion_exports, {
-    pintar: () => pintar4
-  });
-  var vacio = '<p class="muted pequeno">Aún no hay datos.</p>';
-  var fila = (k, v) => `<div class="fila entre"><span>${k}</span><b>${v}</b></div>`;
-  function semana(c, ini, fin) {
-    let total = 0;
-    let hechos = 0;
-    for (let x = ini; x <= fin; x = sumarDias(x, 1)) {
-      const p = progresoDia(c.habitos, c.indice, x);
-      total += p.total;
-      hechos += p.hechos;
+  // ../365/js/vistas/atajos.js
+  var B = (t) => `<b>${t}</b>`;
+  var volver = `<a class="enlace" href="#/espacio/ajustes/atajos">${icono("atras")} Atajos</a>`;
+  var NOTA_UBICACION = `Una sola vez: Ajustes del iPhone → ${B("Privacidad y seguridad")} → ${B("Localización")} → ${B("Atajos")} → ${B("Siempre")}, y activa ${B("Ubicación exacta")}.`;
+  function pasosLugar(evento, sitio, dos) {
+    return [
+      `Toca ${B("Copiar dirección")}${dos ? ` (la de ${evento === "llegar" ? "llegar" : "salir"})` : ""}.`,
+      `Abre la app ${B("Atajos")} → pestaña ${B("Automatización")} (abajo).`,
+      `Toca ${B("+")} → ${B(evento === "llegar" ? "Llegar" : "Salir")}.`,
+      `${B("Ubicación")} → ${B("Elegir")} → escribe la dirección de ${sitio} → ${B("Hecho")}.`,
+      `Marca ${B("Ejecutar inmediatamente")} → ${B("Siguiente")}.`,
+      `${B("Nueva automatización en blanco")} → ${B("Añadir acción")} → busca ${B("Obtener contenido de URL")} y tócala.`,
+      `Toca la palabra azul ${B("URL")}, deja el dedo apretado → ${B("Pegar")} → ${B("Hecho")}.`
+    ];
+  }
+  var hay = (lista2, fn) => lista2.some(fn);
+  var PASOS = [
+    {
+      id: "casa",
+      titulo: "Llegar a casa",
+      para: "Para el arranque de tarde: 365 sabe que has llegado sin que toques nada.",
+      esencial: true,
+      urls: [["Llegar a casa", "tipo=lugar&lugar=casa&evento=llegar"]],
+      pasos: () => pasosLugar("llegar", "tu casa"),
+      nota: NOTA_UBICACION,
+      hecho: (c) => hay(c.fichajes, (f) => f.lugar === "casa" && f.evento === "llegar")
+    },
+    {
+      id: "momento",
+      titulo: "Doble toque: «Tengo ganas»",
+      para: "Dos toques en la espalda del iPhone apuntan el momento al instante, sin abrir nada.",
+      esencial: true,
+      urls: [["Tengo ganas", "tipo=ganas"]],
+      pasos: () => [
+        `Toca ${B("Copiar dirección")}.`,
+        `Abre ${B("Atajos")} → pestaña ${B("Atajos")} → ${B("+")}.`,
+        `${B("Añadir acción")} → ${B("Obtener contenido de URL")} → toca ${B("URL")}, deja el dedo → ${B("Pegar")}.`,
+        `Arriba, toca el nombre → ${B("Cambiar nombre")} → escribe ${B("Momento")} → ${B("OK")}. Es un nombre neutro, por si sale algún aviso.`,
+        `Ahora en ${B("Ajustes")} del iPhone → ${B("Accesibilidad")} → ${B("Tocar")} → ${B("Toque atrás")} → ${B("Doble toque")} → elige ${B("Momento")}.`,
+        "Pruébalo: dos toques en la espalda del iPhone. En HOY saldrá «Momento de las…»."
+      ],
+      hecho: (c) => hay(c.marcas, (m) => m.origen === "atajo")
+    },
+    {
+      id: "casa-salir",
+      titulo: "Salir de casa",
+      para: "Si sales por la tarde, cuenta como tarde arrancada.",
+      urls: [["Salir de casa", "tipo=lugar&lugar=casa&evento=salir"]],
+      pasos: () => pasosLugar("salir", "tu casa"),
+      nota: NOTA_UBICACION,
+      hecho: (c) => hay(c.fichajes, (f) => f.lugar === "casa" && f.evento === "salir")
+    },
+    {
+      id: "gimnasio",
+      titulo: "Gimnasio",
+      para: "Se apunta solo cuándo vas y cuánto rato. Son dos automatizaciones: llegar y salir.",
+      urls: [["llegar", "tipo=lugar&lugar=gimnasio&evento=llegar"], ["salir", "tipo=lugar&lugar=gimnasio&evento=salir"]],
+      pasos: () => [...pasosLugar("llegar", "tu gimnasio", true), `Repite lo mismo con ${B("Salir")} y la dirección de salir.`],
+      nota: NOTA_UBICACION,
+      hecho: (c) => hay(c.fichajes, (f) => f.lugar === "gimnasio")
+    },
+    {
+      id: "trabajo",
+      titulo: "Trabajo",
+      para: "Horas de trabajo, solo para tu información.",
+      urls: [["llegar", "tipo=lugar&lugar=trabajo&evento=llegar"], ["salir", "tipo=lugar&lugar=trabajo&evento=salir"]],
+      pasos: () => [...pasosLugar("llegar", "tu trabajo", true), `Repite lo mismo con ${B("Salir")} y la dirección de salir.`],
+      nota: NOTA_UBICACION,
+      hecho: (c) => hay(c.fichajes, (f) => f.lugar === "trabajo")
+    },
+    {
+      id: "madre",
+      titulo: "Casa de mi madre",
+      para: "Las visitas se apuntan solas. Sin horas ni puntuación.",
+      urls: [["Llegar a casa de mi madre", "tipo=lugar&lugar=madre&evento=llegar"]],
+      pasos: () => pasosLugar("llegar", "la casa de tu madre"),
+      nota: NOTA_UBICACION,
+      hecho: (c) => hay(c.fichajes, (f) => f.lugar === "madre")
+    },
+    {
+      id: "siri",
+      titulo: "Siri: «Apunta en 365»",
+      para: "Dictas un gasto, una tarea o un hábito hecho y 365 lo coloca solo.",
+      urls: [["Apuntar", ""]],
+      pasos: () => [
+        `Toca ${B("Copiar dirección")}.`,
+        `Abre ${B("Atajos")} → pestaña ${B("Atajos")} → ${B("+")} → ${B("Añadir acción")} → ${B("Dictar texto")}.`,
+        `Añade otra acción: ${B("Obtener contenido de URL")} → toca ${B("URL")} → ${B("Pegar")}.`,
+        `Toca la flecha ${B("›")} de esa acción → ${B("Método")}: ${B("POST")} → ${B("Cuerpo de la solicitud")}: ${B("JSON")}.`,
+        `${B("Añadir nuevo campo")} → ${B("Texto")} → clave ${B("tipo")}, valor ${B("captura")}.`,
+        `Otro campo ${B("Texto")} → clave ${B("texto")} → en el valor, toca y elige la variable ${B("Texto dictado")}.`,
+        `Ponle de nombre ${B("Apunta en 365")}. Se usa diciendo «Oye Siri, apunta en 365».`
+      ],
+      hecho: (c) => hay(c.capturas, (x) => x.origen === "siri" && !/^\s*(banco|aviso)\s*:/i.test(x.texto || ""))
+    },
+    {
+      id: "banco",
+      titulo: "Aviso de pago del banco",
+      para: "Cada pago con tarjeta se apunta al momento como gasto. El banco lo confirmará después.",
+      urls: [["Aviso del banco", ""]],
+      pasos: () => [
+        `Toca ${B("Copiar dirección")}.`,
+        `${B("Atajos")} → ${B("Automatización")} → ${B("+")} → busca ${B("Notificación")} → elige la app de tu banco → ${B("Ejecutar inmediatamente")} → ${B("Siguiente")}.`,
+        `${B("Nueva automatización en blanco")} → ${B("Obtener contenido de URL")} → toca ${B("URL")} → ${B("Pegar")}.`,
+        `Toca ${B("›")} → ${B("Método")}: ${B("POST")} → ${B("Cuerpo de la solicitud")}: ${B("JSON")}.`,
+        `Campo ${B("Texto")}: clave ${B("tipo")}, valor ${B("captura")}.`,
+        `Campo ${B("Texto")}: clave ${B("texto")}. En el valor escribe ${B("Banco:")} y un espacio, y después añade la variable con el texto de la notificación.`
+      ],
+      nota: "Si tu iPhone no tiene la automatización «Notificación», sáltate este paso: los pagos entrarán igual cuando conectemos el banco. Y mándame la captura de un aviso de pago real para afinar la lectura.",
+      hecho: (c) => hay(c.movimientos, (m) => m.origen === "aviso")
+    },
+    {
+      id: "agenda",
+      titulo: "Agenda a las 6:30",
+      para: "HOY te enseña tu próximo compromiso. Es el más largo: déjalo para otro día.",
+      urls: [["Agenda", ""]],
+      pasos: () => [
+        `Toca ${B("Copiar dirección")}.`,
+        `${B("Atajos")} → ${B("Automatización")} → ${B("+")} → ${B("Hora del día")} → ${B("6:30")}, ${B("Diariamente")} → ${B("Ejecutar inmediatamente")} → ${B("Siguiente")}.`,
+        `${B("Nueva automatización en blanco")} → acción ${B("Buscar eventos del calendario")} → filtro ${B("Fecha de inicio")} está en los próximos ${B("7 días")}.`,
+        `Acción ${B("Repetir con cada")}. Dentro, acción ${B("Texto")} con: Fecha de inicio | Fecha de finalización | Título (variables del elemento repetido; en cada fecha elige formato ${B("ISO 8601")} con hora).`,
+        `Después de «Fin de repetir», acción ${B("Combinar texto")} con ${B("Nueva línea")}.`,
+        `Acción ${B("Obtener contenido de URL")} → ${B("Pegar")} → ${B("›")} → ${B("POST")} → ${B("JSON")}: campo ${B("tipo")} = ${B("agenda")}, campo ${B("lineas")} = variable ${B("Texto combinado")}.`
+      ],
+      hecho: (c) => c.eventos.length > 0
     }
-    return { total, hechos };
+  ];
+  function llave() {
+    const g = meta("llaveAtajos");
+    if (!g) return null;
+    const con = una2("conexiones", g.id);
+    if (!con || !con.activo) return null;
+    return { ...g, con };
   }
-  function pintar4(el2) {
-    const c = contexto();
-    const f = c.fecha;
-    const inicio = c.perfil && c.perfil.inicio || f;
-    const mes = f.slice(0, 7);
-    const ayer = sumarDias(f, -1);
-    const lunes0 = lunesDe(inicio);
-    let celdas = "";
-    for (let s = 0; s < 53; s++) {
-      for (let d = 0; d < 7; d++) {
-        const x = sumarDias(lunes0, s * 7 + d);
-        const cls = x < inicio ? "fuera" : x > f ? "futuro" : `n${nivelDia(c.habitos, c.indice, x)}`;
-        celdas += `<span class="${cls}" title="${x}"></span>`;
-      }
-    }
-    const semanaActual = Math.floor(Math.max(0, diasEntre(lunes0, f)) / 7);
-    const lunes = lunesDe(f);
-    const esta = semana(c, lunes, f);
-    const anterior = semana(c, sumarDias(lunes, -7), sumarDias(lunes, -1));
-    const activos = ordenarHabitos(c.habitos.filter((h) => h.estado === "activo"));
-    const continuidad = activos.map((h) => {
-      const d = sumarDias(f, -28);
-      const cu = cumplimiento(h, c.indice, h.inicio && h.inicio > d ? h.inicio : d, hastaCon(h, c.indice, f));
-      return `<div class="col" style="gap:4px"><div class="fila entre"><span>${esc(h.nombre)}</span><span class="muted pequeno">${cu.previstos ? `${cu.hechos} de ${cu.previstos}` : "nuevo"}</span></div>
-      <div class="progreso" aria-hidden="true"><span style="width:${cu.pct || 0}%"></span></div></div>`;
-    }).join("");
-    const delMes = (r) => String(r.fecha).startsWith(mes) && cuentaComoHecho(r);
-    const idsArea = (area) => new Set(c.habitos.filter((h) => h.area === area).map((h) => h.id));
-    const med = idsArea("meditacion");
-    const lec = idsArea("lectura");
-    const diasMeditacion = new Set(c.registros.filter((r) => !r.deleted && med.has(r.habito_id) && delMes(r)).map((r) => r.fecha)).size;
-    const diasDiario = new Set(c.diario.filter((d) => d.tipo !== "relacion" && String(d.fecha).startsWith(mes)).map((d) => d.fecha)).size;
-    const minLectura = c.registros.filter((r) => !r.deleted && lec.has(r.habito_id) && cuentaComoHecho(r)).reduce((a, r) => a + (Number(r.minutos) || 0), 0);
-    const gym = visitas(c.fichajes, "gimnasio").filter((v) => v.fecha.startsWith(mes));
-    const gymMin = gym.filter((v) => v.minutos != null).map((v) => v.minutos);
-    const media = gymMin.length ? Math.round(gymMin.reduce((a, b) => a + b, 0) / gymMin.length) : null;
-    const tardes = resumenTardes({ fichajes: c.fichajes, registros: c.registros, dias: c.dias, ahoraMs: c.ahoraMs }, lunes, f);
-    const hayTardes = tardes.arrancadas + tardes.descanso + tardes.sinDecidir > 0;
-    const ganas = ganasPorSemana(c.marcas, f, 8);
-    const maxG = Math.max(1, ...ganas.map((s) => s.n));
-    const hayGanas = ganas.some((s) => s.n);
-    const gastosMes = c.movimientos.filter((m) => String(m.fecha).startsWith(mes) && Number(m.importe) < 0);
-    const suma = (lst) => lst.reduce((a, m) => a + Math.abs(Number(m.importe) || 0), 0);
-    const ingresosMes = c.movimientos.filter((m) => String(m.fecha).startsWith(mes) && Number(m.importe) > 0);
-    el2.innerHTML = `<div class="pantalla">
-    <header class="cabecera"><h1>Evolución</h1><p class="muted">Solo lo que ha pasado de verdad. Un día sin hacer no borra nada.</p></header>
-    <section class="tarjeta col"><div class="fila entre"><h2>Tu año</h2><span class="muted pequeno">desde el ${esc(fechaCorta(inicio))}</span></div>
-      <div class="mapa-anual" data-mapa>${celdas}</div>
-      <div class="leyenda pequeno muted"><span><i class="n0"></i>Nada</span><span><i class="n2"></i>Algo</span><span><i class="n4"></i>Todo</span></div></section>
-    <section class="tarjeta col"><h2>Semana</h2>
-      ${esta.total || anterior.total ? `${fila("Esta semana", `${esta.hechos} de ${esta.total}`)}${fila("La anterior", anterior.total ? `${anterior.hechos} de ${anterior.total}` : "sin datos")}` : vacio}
-      <p class="muted pequeno">Hábitos hechos (o en versión mínima) de los que tocaban.</p></section>
-    <section class="tarjeta col"><h2>Cada hábito · últimas 4 semanas</h2>${continuidad || vacio}</section>
-    <section class="tarjeta col"><h2>${MESES[aFecha(f).getMonth()].replace(/^./, (x) => x.toUpperCase())}</h2>
-      ${fila("Días con meditación", diasMeditacion)}${fila("Días con diario", diasDiario)}
-      ${fila("Gimnasio", gym.length ? `${gym.length} ${gym.length === 1 ? "vez" : "veces"}${media ? ` · ${minutosTexto(media)} de media` : ""}` : "0")}
-      ${fila("Lectura acumulada", minLectura ? minutosTexto(minLectura) : "0")}</section>
-    <section class="tarjeta col"><h2>Tardes de esta semana</h2>
-      ${hayTardes ? `${fila("Arrancadas", tardes.arrancadas)}${fila("Descanso elegido", tardes.descanso)}${fila("Sin decidir", tardes.sinDecidir)}${tardes.media != null ? fila("Hasta arrancar", minutosTexto(tardes.media)) : ""}` : '<p class="muted pequeno">Aparecen cuando el atajo de llegar a casa esté puesto.</p>'}</section>
-    <section class="tarjeta col"><div class="fila entre"><h2>Ganas por semana</h2><a class="enlace" href="#/espacio/ganas">Ver más</a></div>
-      ${hayGanas ? `<div class="barras">${ganas.map((s) => `<div class="b aviso"><span style="height:${Math.round(100 * s.n / maxG)}%"></span><small>${s.ini.slice(8)}/${s.ini.slice(5, 7)}</small></div>`).join("")}</div>` : vacio}</section>
-    <section class="tarjeta col"><div class="fila entre"><h2>Dinero este mes</h2><a class="enlace" href="#/espacio/finanzas">Ver más</a></div>
-      ${gastosMes.length || ingresosMes.length ? `${fila("Gastos", euros(suma(gastosMes)))}${fila("Caprichos", euros(suma(gastosMes.filter((m) => m.etiqueta === "capricho"))))}${fila("Comida basura y dulces", euros(suma(gastosMes.filter((m) => m.etiqueta === "basura"))))}${ingresosMes.length ? fila("Ingresos", euros(suma(ingresosMes))) : ""}` : '<p class="muted pequeno">Con el banco conectado (fase 2) aparece solo. Ahora, lo que apuntes a mano.</p>'}</section>
-  </div>`;
-    const mapa2 = el2.querySelector("[data-mapa]");
-    if (mapa2) mapa2.scrollLeft = Math.max(0, semanaActual * 15 - mapa2.clientWidth / 2);
+  var direccion = (k, q) => `${urlIngest()}?llave=${k.token}${q ? `&${q}` : ""}`;
+  function datos() {
+    return { fichajes: todas2("fichajes"), marcas: todas2("marcas"), capturas: todas2("capturas"), movimientos: todas2("movimientos"), eventos: todas2("eventos") };
   }
-
-  // ../365/js/vistas/espacio.js
-  var espacio_exports = {};
-  __export(espacio_exports, {
-    pintar: () => pintar7
-  });
-
-  // ../365/js/vistas/ganas.js
-  var ganas_exports = {};
-  __export(ganas_exports, {
-    CONTEXTOS: () => CONTEXTOS,
-    OPCIONES: () => OPCIONES,
-    enlaceWhatsApp: () => enlaceWhatsApp,
-    pintar: () => pintar5,
-    pintarModulo: () => pintarModulo
-  });
-  var CONTEXTOS = ["Cansancio", "Aburrimiento", "Estrés", "Soledad", "Quedada o fiesta", "Discusión", "Celebración", "Hambre"];
-  var OPCIONES = { llamar: "Llamar", escribir: "Escribir a alguien", respirar: "Esperar respirando", andar: "Andar", ducha: "Ducha", comer: "Comer algo", escribirlo: "Escribirlo", razones: "Mis razones", ayuda: "Ayuda profesional" };
-  var RESULTADOS = { pasaron: "Pasaron", siguen: "Siguen", consumi: "Consumí" };
-  var memoria = /* @__PURE__ */ new Map();
-  alTerminarTemporizador("ganas", (t) => {
-    if (t.marca_id) location.hash = `#/ganas/${t.marca_id}/seguimiento`;
-  });
-  var limpiarTel = (t) => String(t || "").replace(/[^\d+]/g, "");
-  function enlaceWhatsApp(c) {
-    let n = limpiarTel(c.tel).replace(/^\+/, "").replace(/^00/, "");
-    if (/^[6789]\d{8}$/.test(n)) n = `34${n}`;
-    return `https://wa.me/${n}?text=${encodeURIComponent(c.mensaje || "Oye, ¿tienes cinco minutos para hablar?")}`;
+  async function crearLlave() {
+    const n = todas2("conexiones").length;
+    const token2 = llaveAleatoria();
+    const id = uuid();
+    guardar("conexiones", { id, nombre: n ? `Atajos ${n + 1}` : "Atajos iPhone", token_hash: await sha256hex(token2), activo: true, ultimo_uso: null });
+    ponerMeta("llaveAtajos", { id, token: token2 });
+    await sincronizar({ soloSubir: true });
+    aviso("Llave creada");
   }
-  async function datosDe(m) {
-    if (memoria.has(m.id)) return memoria.get(m.id);
-    const ya = yaDescifrado(m.cifrado);
-    if (ya) return ya;
-    if (m.cifrado && desbloqueado()) {
-      try {
-        return await descifrar2(m.cifrado);
-      } catch (_) {
-        return null;
-      }
-    }
-    return null;
-  }
-  async function guardarInicio(m, datos) {
-    const id = m ? m.id : uuid();
-    const ts = m ? m.ts : (/* @__PURE__ */ new Date()).toISOString();
-    const inicio = { ...datos, lugar: ultimoLugar(tsMs(ts)), opciones: [], nota: null };
-    memoria.set(id, inicio);
-    let cifrado = null;
+  async function comprobar() {
+    const k = llave();
+    if (!k) return;
     try {
-      cifrado = await cifrar2(inicio);
-    } catch (x) {
-      aviso(x.message);
-    }
-    guardar("marcas", { ...m || {}, id, ts, cifrado, cierre: m ? m.cierre || null : null, abierta: true, origen: m ? m.origen : "app" });
-    return id;
-  }
-  async function actualizarInicio(m, cambio) {
-    const d = await datosDe(m);
-    if (!d) return;
-    const nuevo = cambio(d);
-    memoria.set(m.id, nuevo);
-    try {
-      const cifrado = await cifrar2(nuevo);
-      const actual = una2("marcas", m.id) || m;
-      guardar("marcas", { ...actual, cifrado });
+      const r = await fetch(direccion(k, "tipo=prueba"));
+      const j = await r.json().catch(() => ({}));
+      aviso(r.ok && j.ok ? "La llave funciona" : `No funciona: ${j.error || r.status}`);
+      if (r.ok) sincronizar();
     } catch (_) {
+      aviso("Sin conexión. Prueba otra vez.");
     }
   }
-  function pintarRegistro(el2, m) {
-    const st = { intensidad: null, contexto: /* @__PURE__ */ new Set() };
+  function pintarInicio2(el2) {
+    const k = llave();
+    const c = datos();
+    const cons = todas2("conexiones").sort((a, b) => String(a.nombre).localeCompare(String(b.nombre)));
+    const apagadas = cons.filter((x) => !x.activo).length;
+    const fila2 = (p, i) => {
+      const ok = p.hecho(c);
+      return `<a class="habito" href="#/espacio/ajustes/atajos/${p.id}">
+      <span class="check ${ok ? "hecho" : ""}" aria-hidden="true">${ok ? icono("check") : `<b>${i + 1}</b>`}</span>
+      <div class="info"><div class="nombre">${esc(p.titulo)}${p.esencial ? ' <span class="insignia">primero</span>' : ""}</div><div class="detalle">${esc(p.para)}</div></div>
+      <span class="muted">›</span></a>`;
+    };
     el2.innerHTML = `<div class="pantalla">
-    <a class="enlace" href="#/hoy">${icono("atras")} Hoy</a>
-    <header class="cabecera"><h1>${m ? `Momento de las ${esc(horaMin(m.ts))}` : "Tengo ganas"}</h1><p class="muted">Apúntalo y elige qué hacer. Las ganas suben y bajan.</p></header>
-    <span class="etiqueta">¿Cuántas? Del 1 al 10</span>
-    <div class="intensidad">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `<button type="button" data-int="${n}">${n}</button>`).join("")}</div>
-    <span class="etiqueta">¿Qué hay detrás? (opcional)</span>
-    <div class="chips">${CONTEXTOS.map((c) => `<button type="button" class="chip" data-ctx="${esc(c)}">${esc(c)}</button>`).join("")}</div>
-    <button class="boton principal ancho" data-guardar disabled>Guardar y ver opciones</button>
-    <button class="enlace" data-solo>Solo apuntar la hora y ver opciones</button>
+    <a class="enlace" href="#/espacio/ajustes">${icono("atras")} Ajustes</a>
+    <header class="cabecera"><h1>Atajos</h1><p class="muted">Los atajos del iPhone avisan a 365 solos. Monta primero los dos de arriba; el resto, cuando quieras. 365 nunca ve tu recorrido, solo llegadas y salidas.</p></header>
+    ${k ? `<section class="tarjeta suave fila entre"><span class="fila">${icono("llave")} Llave lista</span><button class="boton peq" data-comprobar>Comprobar</button></section>` : `<section class="tarjeta destacada col"><h2>Primero, tu llave</h2>
+        <p>Es lo que usan los atajos para escribir en 365. Solo sirve para apuntar: con ella no se puede leer nada.</p>
+        ${apagadas ? `<p class="muted pequeno">Tus ${apagadas === 1 ? "llave anterior está apagada" : `${apagadas} llaves anteriores están apagadas`} y no se pueden recuperar. No pasa nada: creamos una nueva.</p>` : ""}
+        <button class="boton principal ancho" data-crear>${icono("llave")} Crear llave</button></section>`}
+    <section class="tarjeta"><div class="lista">${PASOS.map(fila2).join("")}</div></section>
+    ${cons.length ? `<details class="tarjeta suave"><summary>Llaves (avanzado)</summary>
+      ${cons.map((x) => `<div class="fila entre"><div><b>${esc(x.nombre)}</b><br><span class="muted pequeno">${x.activo ? x.ultimo_uso ? `Último uso: ${fechaCorta(fechaDeTs(x.ultimo_uso))} ${horaMin(x.ultimo_uso)}` : "Sin usar todavía" : "Apagada"}</span></div>
+      <button class="boton peq" data-alternar="${esc(x.id)}">${x.activo ? "Apagar" : "Encender"}</button></div>`).join("")}
+      <p class="muted pequeno">Apagar una llave hace que los atajos que la usan dejen de funcionar.</p></details>` : ""}
   </div>`;
     el2.onclick = async (e) => {
-      const i = e.target.closest("[data-int]");
-      if (i) {
-        st.intensidad = Number(i.dataset.int);
-        el2.querySelectorAll("[data-int]").forEach((b) => b.classList.toggle("on", b === i));
-        el2.querySelector("[data-guardar]").disabled = false;
+      if (e.target.closest("[data-crear]")) {
+        await crearLlave();
+        pintarInicio2(el2);
         return;
       }
-      const c = e.target.closest("[data-ctx]");
-      if (c) {
-        const k = c.dataset.ctx;
-        if (st.contexto.has(k)) st.contexto.delete(k);
-        else st.contexto.add(k);
-        c.classList.toggle("activo", st.contexto.has(k));
+      if (e.target.closest("[data-comprobar]")) {
+        comprobar();
         return;
       }
-      const g = e.target.closest("[data-guardar]");
-      const s = e.target.closest("[data-solo]");
-      if (g || s) {
-        if (g) g.disabled = true;
-        const id = await guardarInicio(m, s ? { intensidad: null, contexto: [] } : { intensidad: st.intensidad, contexto: [...st.contexto] });
-        location.hash = `#/ganas/${id}/opciones`;
+      const t = e.target.closest("[data-alternar]");
+      if (t) {
+        const x = una2("conexiones", t.dataset.alternar);
+        if (!x) return;
+        if (x.activo && !await confirmar2({ titulo: `¿Apagar «${x.nombre}»?`, texto: "Los atajos que la usan dejarán de funcionar.", si: "Apagar", peligro: true })) return;
+        guardar("conexiones", { ...x, activo: !x.activo });
+        pintarInicio2(el2);
       }
     };
   }
-  function escribirlo(m) {
-    abrirHoja(`<h2>Escríbelo</h2><p class="muted pequeno">Qué sientes, qué ha pasado. Toca el micrófono del teclado si prefieres hablar.</p>
-    <textarea name="nota" rows="5"></textarea><button class="boton principal ancho" data-ok>Guardar</button>`, (c, cerrar) => {
-      const ta = c.querySelector("textarea");
-      ta.focus();
-      c.querySelector("[data-ok]").onclick = async () => {
-        const txt = ta.value.trim();
-        cerrar();
-        if (!txt) return;
-        await actualizarInicio(m, (d) => ({ ...d, nota: d.nota ? `${d.nota}
-
-${txt}` : txt }));
-        aviso("Guardado y cifrado");
+  function pintarPaso(el2, id) {
+    const p = PASOS.find((x) => x.id === id);
+    if (!p) {
+      pintarInicio2(el2);
+      return;
+    }
+    const k = llave();
+    if (!k) {
+      el2.innerHTML = `<div class="pantalla">${volver}<header class="cabecera"><h1>${esc(p.titulo)}</h1></header>
+      <section class="tarjeta destacada col"><p>Antes hace falta tu llave. Es un toque.</p><button class="boton principal ancho" data-crear>${icono("llave")} Crear llave</button></section></div>`;
+      el2.onclick = async (e) => {
+        if (e.target.closest("[data-crear]")) {
+          await crearLlave();
+          pintarPaso(el2, id);
+        }
       };
-    });
-  }
-  function verRazones(razones) {
-    abrirHoja(`<h2>Mis razones</h2>${razones.map((r) => `<p class="razon">${esc(r)}</p>`).join("")}<button class="boton ancho" data-cerrar>Cerrar</button>`);
-  }
-  function pintarOpciones(el2, m) {
-    const a = ajustes();
-    const contactos = (a.contactos || []).filter((c) => c && c.nombre && c.tel);
-    const razones = (a.razones || []).filter(Boolean);
-    const ayuda = a.ayuda && a.ayuda.tel ? a.ayuda : null;
-    const espera = a.esperaMin || 15;
-    el2.innerHTML = `<div class="pantalla">
-    <a class="enlace" href="#/hoy">${icono("atras")} Hoy</a>
-    <header class="cabecera"><h1>¿Qué hacemos ahora?</h1><p class="muted">Si no se alimentan, suelen bajar en menos de media hora. Elige una cosa.</p></header>
-    <div class="col">
-      ${contactos.map((c, i) => `<a class="boton ancho" href="tel:${esc(limpiarTel(c.tel))}" data-op="llamar" data-i="${i}">${icono("telefono")} Llamar a ${esc(c.nombre)}</a>
-        <a class="boton ancho" href="${esc(enlaceWhatsApp(c))}" target="_blank" rel="noopener" data-op="escribir" data-i="${i}">${icono("mensaje")} Escribir a ${esc(c.nombre)}</a>`).join("")}
-      <button class="boton ancho principal" data-op="respirar">${icono("respirar")} Esperar ${espera} min respirando</button>
-      <button class="boton ancho" data-op="andar">${icono("andar")} Andar 10 minutos</button>
-      <button class="boton ancho" data-op="ducha">${icono("ducha")} Darme una ducha</button>
-      <button class="boton ancho" data-op="comer">${icono("comer")} Comer algo</button>
-      <button class="boton ancho" data-op="escribirlo">${icono("escribir")} Escribirlo</button>
-      ${razones.length ? `<button class="boton ancho" data-op="razones">${icono("razones")} Ver mis razones</button>` : ""}
-      ${ayuda ? `<a class="boton ancho" href="tel:${esc(limpiarTel(ayuda.tel))}" data-op="ayuda">${icono("ayuda")} ${esc(ayuda.nombre || "Ayuda profesional")}</a>` : ""}
-    </div>
-    ${!contactos.length ? '<a class="enlace" href="#/espacio/ajustes/ganas">Añadir personas de apoyo y tus razones</a>' : ""}
-    <button class="boton ancho suave" data-op="volver">Ya está, volver</button>
-    <p class="muted pequeno centro">A los 20 minutos, en HOY, te pregunto cómo van.</p>
-  </div>`;
-    el2.onclick = (e) => {
-      const b = e.target.closest("[data-op]");
-      if (!b) return;
-      const op = b.dataset.op;
-      if (op !== "volver") actualizarInicio(m, (d) => ({ ...d, opciones: [...d.opciones || [], { op, ts: (/* @__PURE__ */ new Date()).toISOString() }] }));
-      if (op === "respirar") empezarTemporizador({ tipo: "ganas", marca_id: m.id, minutos: espera, titulo: "Respira", subtitulo: "Las ganas suben y bajan", respiracion: true });
-      else if (op === "andar") empezarTemporizador({ tipo: "ganas", marca_id: m.id, minutos: 10, titulo: "Andar", subtitulo: "10 minutos fuera" });
-      else if (op === "ducha" || op === "comer") {
-        aviso("Apuntado. Luego te pregunto cómo van.");
-        location.hash = "#/hoy";
-      } else if (op === "escribirlo") escribirlo(m);
-      else if (op === "razones") verRazones(razones);
-      else if (op === "volver") location.hash = "#/hoy";
-    };
-  }
-  async function pintarSeguimiento(el2, m) {
-    const d = await datosDe(m);
-    const st = { intensidad: null, resultado: null, ayudo: /* @__PURE__ */ new Set() };
-    const usadas = d && d.opciones ? d.opciones.map((o) => o.op) : [];
-    const chips = [.../* @__PURE__ */ new Set([...usadas, "respirar", "llamar", "escribir", "andar", "ducha", "comer", "escribirlo", "razones"])].filter((k) => OPCIONES[k]);
-    el2.innerHTML = `<div class="pantalla">
-    <a class="enlace" href="#/hoy">${icono("atras")} Hoy</a>
-    <header class="cabecera"><h1>¿Cómo van?</h1><p class="muted">Desde las ${esc(horaMin(m.ts))}${d && d.intensidad ? ` · antes: ${d.intensidad} de 10` : ""}</p></header>
-    <span class="etiqueta">Ahora, del 0 al 10</span>
-    <div class="intensidad seis">${[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `<button type="button" data-int="${n}">${n}</button>`).join("")}</div>
-    <span class="etiqueta">¿Qué ha pasado?</span>
-    <div class="segmentos">${Object.entries(RESULTADOS).map(([k, t]) => `<button type="button" data-res="${k}">${t}</button>`).join("")}</div>
-    <span class="etiqueta">¿Qué ayudó? (opcional)</span>
-    <div class="chips">${chips.map((k) => `<button type="button" class="chip" data-ay="${k}">${esc(OPCIONES[k])}</button>`).join("")}<button type="button" class="chip" data-ay="nada">Nada en especial</button></div>
-    <button class="boton principal ancho" data-guardar disabled>Guardar</button>
+      return;
+    }
+    const ok = p.hecho(datos());
+    el2.innerHTML = `<div class="pantalla">${volver}
+    <header class="cabecera"><span class="etiqueta">Atajo</span><h1>${esc(p.titulo)}</h1><p class="muted">${esc(p.para)}</p></header>
+    <div class="col">${p.urls.map(([t], i) => `<button class="boton principal ancho" data-copiar="${i}">${icono("copiar")} Copiar dirección${p.urls.length > 1 ? ` de ${esc(t)}` : ""}</button>`).join("")}</div>
+    <ol class="pasos">${p.pasos().map((x) => `<li>${x}</li>`).join("")}</ol>
+    ${p.nota ? `<p class="muted pequeno">${p.nota}</p>` : ""}
+    ${ok ? '<p class="tarjeta suave">Ya ha llegado algo de este atajo: funciona.</p>' : ""}
+    <a class="boton ancho" href="#/espacio/ajustes/atajos">Hecho</a>
   </div>`;
     el2.onclick = async (e) => {
-      const i = e.target.closest("[data-int]");
-      if (i) {
-        st.intensidad = Number(i.dataset.int);
-        el2.querySelectorAll("[data-int]").forEach((b) => b.classList.toggle("on", b === i));
-        return;
-      }
-      const r = e.target.closest("[data-res]");
-      if (r) {
-        st.resultado = r.dataset.res;
-        el2.querySelectorAll("[data-res]").forEach((b) => b.classList.toggle("on", b === r));
-        el2.querySelector("[data-guardar]").disabled = false;
-        return;
-      }
-      const y = e.target.closest("[data-ay]");
-      if (y) {
-        const k = y.dataset.ay;
-        if (st.ayudo.has(k)) st.ayudo.delete(k);
-        else st.ayudo.add(k);
-        y.classList.toggle("activo", st.ayudo.has(k));
-        return;
-      }
-      const g = e.target.closest("[data-guardar]");
-      if (!g || !st.resultado) return;
-      g.disabled = true;
-      let cierre = null;
-      try {
-        cierre = await cifrar2({ ts: (/* @__PURE__ */ new Date()).toISOString(), intensidad: st.intensidad, resultado: st.resultado, ayudo: [...st.ayudo] });
-      } catch (x) {
-        aviso(x.message);
-        g.disabled = false;
-        return;
-      }
-      const actual = una2("marcas", m.id) || m;
-      guardar("marcas", { ...actual, cierre, abierta: false });
-      if (st.resultado === "siguen") {
-        aviso("Apuntado. Probemos otra cosa.");
-        location.hash = `#/ganas/${m.id}/opciones`;
-      } else if (st.resultado === "consumi") {
-        el2.innerHTML = `<div class="pantalla"><header class="cabecera"><h1>Apuntado</h1></header>
-        <p>No se reinicia nada. Lo que llevas hecho sigue ahí.</p>
-        <p class="muted">Cuando estés con calma, escribir qué pasó ayuda a preparar la próxima vez.</p>
-        <a class="boton principal ancho" href="#/hoy">Volver a Hoy</a>
-        <a class="boton ancho" href="#/diario/escribir/libre">${icono("escribir")} Escribirlo ahora</a></div>`;
-      } else {
-        aviso("Apuntado");
-        location.hash = "#/hoy";
-      }
+      const b = e.target.closest("[data-copiar]");
+      if (!b) return;
+      const [, q] = p.urls[Number(b.dataset.copiar)];
+      aviso(await copiarTexto(direccion(k, q)) ? "Copiada. Ahora pégala en Atajos." : "No se pudo copiar");
     };
   }
-  function pintar5(el2, partes) {
-    app.vistaEstable = true;
-    document.body.classList.add("sin-tabs");
-    const [id, paso] = partes;
-    if (!id) {
-      pintarRegistro(el2, null);
-      return;
-    }
-    const m = una2("marcas", decodeURIComponent(id));
-    if (!m) {
-      location.hash = "#/hoy";
-      return;
-    }
-    if (paso === "seguimiento") pintarSeguimiento(el2, m);
-    else if (paso === "opciones" || m.cifrado) pintarOpciones(el2, m);
-    else pintarRegistro(el2, m);
-  }
-  var nivel = (n, max) => !n ? "" : n <= max / 3 ? "n1" : n <= 2 * max / 3 ? "n2" : "n3";
-  var lista = (pares, nombres = null) => pares.slice(0, 4).map(([k, n]) => `<div class="fila entre"><span>${esc(nombres ? nombres[k] || k : k)}</span><b>${n}</b></div>`).join("") || '<p class="muted pequeno">Aún sin datos.</p>';
-  async function pintarModulo(el2) {
-    const c = contexto();
-    const marcas = [...c.marcas].sort((a, b) => tsMs(b.ts) - tsMs(a.ts));
-    const semanas = ganasPorSemana(marcas, c.fecha, 8);
-    const max = Math.max(1, ...semanas.map((s) => s.n));
-    const g = rejillaGanas(marcas);
-    const maxG = Math.max(1, ...g.flat());
-    const esta = semanas[semanas.length - 1].n;
-    const anterior = semanas[semanas.length - 2].n;
-    let detalles = "";
-    let recientes = marcas.slice(0, 12).map((m) => ({ m, d: null }));
-    if (desbloqueado()) {
-      const todos = [];
-      for (const m of marcas) {
-        let inicio = null;
-        let cierre = null;
-        try {
-          inicio = m.cifrado ? await descifrar2(m.cifrado) : null;
-        } catch (_) {
-          inicio = null;
-        }
-        try {
-          cierre = m.cierre ? await descifrar2(m.cierre) : null;
-        } catch (_) {
-          cierre = null;
-        }
-        todos.push({ m, d: { inicio, cierre } });
-      }
-      recientes = todos.slice(0, 12);
-      const p = patronesGanas(todos.map((x) => x.d));
-      detalles = `<section class="tarjeta col"><h2>Qué hay detrás</h2>${lista(p.contextos)}</section>
-      <section class="tarjeta col"><h2>Qué ayudó</h2>${lista(p.ayudo, OPCIONES)}</section>
-      <section class="tarjeta col"><h2>Cómo acabaron</h2>${lista(p.resultados, RESULTADOS)}
-        ${p.mediaAntes != null ? `<p class="muted pequeno">Intensidad media al empezar: ${p.mediaAntes}${p.mediaDespues != null ? ` · al rato: ${p.mediaDespues}` : ""}</p>` : ""}</section>`;
-    } else {
-      detalles = htmlDesbloqueo("Por qué aparecen y qué te ayuda está cifrado. Desbloquea para verlo.");
-    }
-    const fila2 = ({ m, d }) => {
-      const ini = d && d.inicio;
-      const fin = d && d.cierre;
-      const extra = ini || fin ? ` · ${ini && ini.intensidad ? `${ini.intensidad}/10` : ""}${fin ? ` → ${RESULTADOS[fin.resultado] || ""}` : ""}` : "";
-      return `<div class="fila entre"><span>${esc(fechaCorta(fechaDeTs(m.ts)))} · ${esc(horaMin(m.ts))}</span><span class="muted pequeno">${esc(extra.replace(/^ · /, ""))}</span></div>`;
-    };
-    el2.innerHTML = `<div class="pantalla">
-    <a class="enlace" href="#/espacio">${icono("atras")} Mi espacio</a>
-    <header class="cabecera"><h1>Ganas</h1><p class="muted">Privado. Nada se reinicia por un mal día.</p></header>
-    <a class="boton aviso ancho" href="#/ganas">${icono("ganas")} Tengo ganas</a>
-    <section class="tarjeta col"><div class="fila entre"><h2>Por semana</h2><span class="muted pequeno">Esta: ${esta} · la anterior: ${anterior}</span></div>
-      <div class="barras">${semanas.map((s) => `<div class="b aviso"><span style="height:${Math.round(100 * s.n / max)}%"></span><small>${s.ini.slice(8)}/${s.ini.slice(5, 7)}</small></div>`).join("")}</div></section>
-    <section class="tarjeta col"><h2>Cuándo aparecen</h2>
-      <div class="rejilla-ganas"><span></span>${DIAS_CORTOS.map((d) => `<b>${d}</b>`).join("")}${["Madrugada", "Mañana", "Tarde", "Noche"].map((fr, i) => `<span class="muted">${fr}</span>${g[i].map((n) => `<span class="c ${nivel(n, maxG)}" title="${n}"></span>`).join("")}`).join("")}</div></section>
-    ${detalles}
-    ${recientes.length ? `<section class="tarjeta col"><h2>Últimas veces</h2>${recientes.map(fila2).join("")}</section>` : ""}
-    <a class="boton ancho" href="#/espacio/ajustes/ganas">${icono("ajustes")} Personas de apoyo, razones y plan</a>
-  </div>`;
-    if (!desbloqueado()) montarDesbloqueo(el2, () => pintarModulo(el2));
-    else app.vistaEstable = true;
+  function pintar3(el2, partes) {
+    if (partes[0]) pintarPaso(el2, partes[0]);
+    else pintarInicio2(el2);
   }
 
   // ../365/js/vistas/ajustes.js
   var SECCIONES = [
     ["apariencia", "Apariencia", "Tema y tamaño de letra", "ajustes"],
     ["horario", "Horario", "Horas de cada hábito y la tarde", "reloj"],
-    ["atajos", "Atajos y sitios", "Casa, trabajo, gimnasio, tu madre, Siri", "ubicacion"],
+    ["atajos", "Atajos", "Que el iPhone apunte solo: casa, doble toque, Siri, banco", "ubicacion"],
     ["ganas", "Ganas", "Personas de apoyo, razones y plan", "ganas"],
     ["privacidad", "Privacidad", "Frase secreta y bloqueo", "candado"],
     ["datos", "Datos", "Sincronización y copia", "sync"],
@@ -3524,84 +3448,6 @@ ${txt}` : txt }));
       if (e.target.matches("[data-tarde-activo], [data-tarde-min]")) {
         guardarAjustes({ tarde: { activo: el2.querySelector("[data-tarde-activo]").checked, minutos: Number(el2.querySelector("[data-tarde-min]").value) } });
         aviso("Guardado");
-      }
-    };
-  }
-  function urls(base, llave) {
-    const u = (q) => `${base}?llave=${llave}&${q}`;
-    const sitios = [["casa", "Casa"], ["trabajo", "Trabajo"], ["gimnasio", "Gimnasio"], ["madre", "Casa de mi madre"]];
-    const lista2 = [];
-    for (const [k, n] of sitios) {
-      lista2.push([`Llegar a ${n.toLowerCase()}`, u(`tipo=lugar&lugar=${k}&evento=llegar`)]);
-      lista2.push([`Salir de ${n.toLowerCase()}`, u(`tipo=lugar&lugar=${k}&evento=salir`)]);
-    }
-    lista2.push(["Tengo ganas (Toque atrás)", u("tipo=ganas")]);
-    lista2.push(["Comprobar que funciona", u("tipo=prueba")]);
-    lista2.push(["Apuntar con Siri y Agenda (POST con JSON)", `${base}?llave=${llave}`]);
-    return lista2;
-  }
-  function mostrarLlave(nombre, llave) {
-    const base = urlIngest();
-    const lista2 = urls(base, llave);
-    const todo = `365 · ${nombre}
-Llave: ${llave}
-
-${lista2.map(([t, u]) => `${t}:
-${u}`).join("\n\n")}
-
-Apuntar con Siri: POST a la última URL con JSON {"tipo":"captura","texto":"<Texto dictado>"}
-Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>|<título> (una línea por evento)"}`;
-    abrirHoja(`<h2>Llave creada</h2>
-    <p class="tarjeta aviso pequeno">Cópiala ahora: por seguridad no se vuelve a mostrar. Si la pierdes, creas otra y borras esta.</p>
-    <div class="codigo">${esc(llave)}</div>
-    <button class="boton principal ancho" data-copiar-todo>${icono("copiar")} Copiar todo (llave y direcciones)</button>
-    <p class="muted pequeno">Pégalo en una nota con candado para montar los atajos con calma.</p>
-    <div class="col">${lista2.map(([t, u], i) => `<div class="fila entre"><span class="pequeno">${esc(t)}</span><button class="boton peq" data-copiar="${i}">Copiar</button></div>`).join("")}</div>
-    <button class="boton ancho" data-cerrar>Hecho</button>`, (c) => {
-      c.addEventListener("click", async (e) => {
-        if (e.target.closest("[data-copiar-todo]")) {
-          aviso(await copiarTexto(todo) ? "Copiado" : "No se pudo copiar");
-          return;
-        }
-        const b = e.target.closest("[data-copiar]");
-        if (b) aviso(await copiarTexto(lista2[Number(b.dataset.copiar)][1]) ? "Copiado" : "No se pudo copiar");
-      });
-    });
-  }
-  function pintarAtajos(el2) {
-    const cons = todas2("conexiones").sort((a, b) => String(a.nombre).localeCompare(String(b.nombre)));
-    const fs = todas2("fichajes");
-    const ultimo = (lugar) => fs.filter((f) => f.lugar === lugar).sort((a, b) => tsMs(b.ts) - tsMs(a.ts))[0];
-    const textoUltimo = (f) => !f ? "Sin datos todavía" : `${f.evento === "llegar" ? "Llegada" : "Salida"} ${fechaDeTs(f.ts) === hoy() ? "hoy" : fechaCorta(fechaDeTs(f.ts))} a las ${horaMin(f.ts)}`;
-    el2.innerHTML = `<div class="pantalla">${volverAjustes}
-    <header class="cabecera"><h1>Atajos y sitios</h1><p class="muted">Los Atajos del iPhone avisan a 365 cuando llegas o te vas de un sitio. 365 nunca ve el recorrido, solo esas llegadas y salidas.</p></header>
-    <section class="tarjeta col"><h2>Sitios</h2>${LUGARES.map((l) => `<div class="fila entre"><span>${esc(l.nombre)}</span><span class="muted pequeno">${esc(textoUltimo(ultimo(l.id)))}</span></div>`).join("")}</section>
-    <section class="tarjeta col"><h2>Llaves</h2>
-      <p class="muted pequeno">Cada atajo usa una llave. Si un día se escapa, la desactivas y ya no sirve.</p>
-      ${cons.length ? cons.map((k) => `<div class="fila entre"><div><b>${esc(k.nombre)}</b><br><span class="muted pequeno">${k.activo ? k.ultimo_uso ? `Último uso: ${fechaCorta(fechaDeTs(k.ultimo_uso))} ${horaMin(k.ultimo_uso)}` : "Sin usar todavía" : "Desactivada"}</span></div>
-        <button class="boton peq ${k.activo ? "peligro" : ""}" data-alternar="${esc(k.id)}">${k.activo ? "Desactivar" : "Activar"}</button></div>`).join("") : '<p class="muted">Aún no hay ninguna.</p>'}
-      <button class="boton principal" data-crear>${icono("llave")} Crear llave</button>
-    </section>
-    <section class="tarjeta suave col"><h2>Cómo se monta</h2>
-      <p class="pequeno">En Atajos › Automatización › Nueva: «Llegar» a Casa → acción «Obtener contenido de URL» con la dirección de «Llegar a casa». Marca «Ejecutar inmediatamente». Igual con «Salir» y con los otros sitios.</p>
-      <p class="pequeno">«Tengo ganas»: Ajustes › Accesibilidad › Tocar › Toque atrás › Doble toque → un atajo con su dirección.</p>
-      <p class="pequeno">La guía paso a paso está en el proyecto de Claude.</p>
-    </section>
-  </div>`;
-    el2.onclick = async (e) => {
-      const t = e.target.closest("[data-alternar]");
-      if (t) {
-        const k = una2("conexiones", t.dataset.alternar);
-        if (k) guardar("conexiones", { ...k, activo: !k.activo });
-        return;
-      }
-      if (e.target.closest("[data-crear]")) {
-        const nombre = todas2("conexiones").length ? `Atajos ${todas2("conexiones").length + 1}` : "Atajos iPhone";
-        const llave = llaveAleatoria();
-        const hash = await sha256hex(llave);
-        guardar("conexiones", { id: uuid(), nombre, token_hash: hash, activo: true, ultimo_uso: null });
-        await sincronizar({ soloSubir: true });
-        mostrarLlave(nombre, llave);
       }
     };
   }
@@ -3735,9 +3581,9 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
     };
   }
   async function exportar() {
-    const datos = { app: "365", version: VERSION, fecha: (/* @__PURE__ */ new Date()).toISOString(), nota: "Diario, Relación y Ganas siguen cifrados." };
-    for (const t of TABLAS) datos[t] = todas(t);
-    const txt = JSON.stringify(datos, null, 1);
+    const datos2 = { app: "365", version: VERSION, fecha: (/* @__PURE__ */ new Date()).toISOString(), nota: "Diario, Relación y Ganas siguen cifrados." };
+    for (const t of TABLAS) datos2[t] = todas(t);
+    const txt = JSON.stringify(datos2, null, 1);
     const nombre = `365-copia-${hoy()}.json`;
     const archivo = new File([txt], nombre, { type: "application/json" });
     if (navigator.canShare && navigator.canShare({ files: [archivo] })) {
@@ -3802,11 +3648,11 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
       location.reload();
     };
   }
-  function pintar6(el2, partes) {
+  function pintar4(el2, partes) {
     const s = partes[0];
     if (s === "apariencia") pintarApariencia(el2);
     else if (s === "horario") pintarHorario(el2);
-    else if (s === "atajos") pintarAtajos(el2);
+    else if (s === "atajos") pintar3(el2, partes.slice(1));
     else if (s === "ganas") pintarGanasAjustes(el2);
     else if (s === "privacidad") pintarPrivacidad(el2);
     else if (s === "datos") pintarDatos(el2);
@@ -3831,7 +3677,7 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
   ];
   var atras = `<a class="enlace" href="#/espacio">${icono("atras")} Mi espacio</a>`;
   var ETIQUETAS = { necesario: "Necesario", capricho: "Capricho", basura: "Basura o dulces" };
-  function pintarInicio2(el2) {
+  function pintarInicio3(el2) {
     el2.innerHTML = `<div class="pantalla">
     <header class="cabecera"><h1>Mi espacio</h1></header>
     <div class="modulos">${MODULOS.map((m) => m.off ? `<div class="modulo off" aria-disabled="true">${icono(m.icono)}<b>${esc(m.nombre)}</b><small>${esc(m.sub)}</small></div>` : `<a class="modulo" href="#/espacio/${m.id}">${icono(m.icono)}<b>${esc(m.nombre)}</b><small>${esc(m.sub)}</small></a>`).join("")}</div>
@@ -3868,6 +3714,127 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
       };
     });
   }
+  function ponerPresupuesto() {
+    const actual = ajustes().presupuesto || "";
+    abrirHoja(`<h2>Presupuesto del mes</h2>
+    <p class="muted pequeno">Lo que quieres gastar como mucho en un mes, sin contar recibos fijos si prefieres.</p>
+    <form class="col" data-pres>
+      <label class="campo">Euros al mes<input type="text" name="importe" inputmode="decimal" value="${esc(actual)}" placeholder="1200"></label>
+      <div class="botones"><button class="boton principal" type="submit">Guardar</button>${actual ? '<button class="boton" type="button" data-quitar>Quitar</button>' : ""}</div>
+    </form>`, (c, cerrar) => {
+      const f = c.querySelector("[data-pres]");
+      f.importe.focus();
+      f.onsubmit = (e) => {
+        e.preventDefault();
+        const n = Number(String(f.importe.value).replace(/\./g, "").replace(",", "."));
+        if (!(n > 0)) return;
+        guardarAjustes({ presupuesto: Math.round(n) });
+        cerrar();
+        aviso("Presupuesto guardado");
+      };
+      const q = c.querySelector("[data-quitar]");
+      if (q) q.onclick = () => {
+        guardarAjustes({ presupuesto: null });
+        cerrar();
+      };
+    });
+  }
+  function apuntarIngreso() {
+    abrirHoja(`<h2>Apuntar un ingreso</h2>
+    <form class="col" data-ingreso>
+      <label class="campo">Importe (€)<input type="text" name="importe" inputmode="decimal" placeholder="1500" required></label>
+      <label class="campo">De qué<input type="text" name="concepto" maxlength="80" placeholder="Nómina, devolución…"></label>
+      <p class="error pequeno" role="alert"></p>
+      <button class="boton principal ancho" type="submit">Guardar</button>
+    </form>`, (c, cerrar) => {
+      const f = c.querySelector("[data-ingreso]");
+      f.importe.focus();
+      f.onsubmit = (e) => {
+        e.preventDefault();
+        const n = Number(String(f.importe.value).replace(/\.(?=\d{3}(\D|$))/g, "").replace(",", "."));
+        if (!(n > 0)) {
+          f.querySelector(".error").textContent = "Escribe un importe.";
+          return;
+        }
+        guardar("movimientos", { id: uuid(), fecha: hoy(), importe: n, moneda: "EUR", comercio: f.concepto.value.trim() || "Ingreso", categoria: null, etiqueta: null, origen: "manual", estado: "confirmado", ext_id: null, nota: null });
+        cerrar();
+        aviso(`Ingreso de ${euros(n)} apuntado`);
+      };
+    });
+  }
+  var ESTADO_BANCO = { pendiente: "Conectando…", activo: "Conectado", caducado: "Permiso caducado", error: "Con problemas" };
+  function diasPermiso(b) {
+    return b && b.valido_hasta ? Math.ceil((tsMs(b.valido_hasta) - Date.now()) / 864e5) : null;
+  }
+  function bancoPorRenovar(b) {
+    const d = diasPermiso(b);
+    return !!b && (b.estado === "caducado" || d != null && d <= 7);
+  }
+  function tarjetaBanco() {
+    const b = todas2("bancos")[0];
+    if (!b) {
+      return `<section class="tarjeta suave col"><div class="fila entre"><h2>Banco</h2><span class="insignia">Sin conectar</span></div>
+      <p class="muted pequeno">Conectado, los gastos entran solos cada día y confirman los avisos sin duplicar. Se prepara una vez con el portátil (unos 15 minutos).</p>
+      <button class="boton" data-accion="banco-conectar">Conectar el banco</button></section>`;
+    }
+    const d = diasPermiso(b);
+    const renovar = bancoPorRenovar(b);
+    return `<section class="tarjeta ${renovar ? "aviso" : ""} col" data-banco>
+    <div class="fila entre"><h2>${esc(b.aspsp || "Banco")}</h2><span class="insignia">${ESTADO_BANCO[b.estado] || esc(b.estado)}</span></div>
+    ${b.saldo != null ? `<div class="fila entre"><span>Saldo</span><b>${euros(Number(b.saldo))}</b></div>` : ""}
+    <p class="muted pequeno">${b.ultima_sync ? `Actualizado ${esc(fechaCorta(fechaDeTs(b.ultima_sync)))} a las ${horaMin(b.ultima_sync)}` : "Aún sin movimientos"}${d != null && d > 0 ? ` · permiso para ${d} ${d === 1 ? "día" : "días"} más` : ""}</p>
+    ${b.ultimo_error ? `<p class="pequeno">Último problema: ${esc(String(b.ultimo_error).slice(0, 140))}</p>` : ""}
+    <div class="botones">${renovar ? '<button class="boton principal" data-accion="banco-conectar">Renovar el permiso</button>' : ""}<button class="boton" data-accion="banco-sync">Actualizar ahora</button></div>
+  </section>`;
+  }
+  function errorBanco(x) {
+    return /404|no está activad/i.test(x.message) ? "La conexión con el banco aún no está activada. La activamos juntos con el portátil." : x.message;
+  }
+  async function conectarBanco() {
+    aviso("Abriendo la web del banco…");
+    olvidarAusencia("bancos");
+    try {
+      const r = await llamarFuncion("banco", "conectar");
+      if (r.url) {
+        const w = window.open(r.url, "_blank");
+        if (!w) location.href = r.url;
+      }
+    } catch (x) {
+      aviso(errorBanco(x), { ms: 6e3 });
+    }
+  }
+  async function actualizarBanco() {
+    aviso("Pidiendo los movimientos al banco…");
+    olvidarAusencia("bancos");
+    try {
+      const r = await llamarFuncion("banco", "sincronizar");
+      await sincronizar();
+      aviso(r.ok ? `Listo: ${r.creados || 0} nuevos y ${r.actualizados || 0} confirmados` : `Problema: ${r.motivo}`, { ms: 5e3 });
+    } catch (x) {
+      aviso(errorBanco(x), { ms: 6e3 });
+    }
+  }
+  function bloquePresupuesto(gastosMes, ingresosMes, fecha) {
+    const p = Number(ajustes().presupuesto) || 0;
+    const gastado = sumar(gastosMes);
+    const [y, m, d] = fecha.split("-").map(Number);
+    const diasMes = new Date(y, m, 0).getDate();
+    const quedanDias = diasMes - d + 1;
+    let html = "";
+    if (p) {
+      const queda = p - gastado;
+      const pct = Math.min(100, Math.round(100 * gastado / p));
+      html += `<div class="fila entre"><span>Presupuesto</span><b>${euros(gastado)} de ${euros(p)}</b></div>
+      <div class="progreso ${queda < 0 ? "pasado" : ""}" aria-hidden="true"><span style="width:${pct}%"></span></div>
+      <p class="${queda < 0 ? "" : "muted"} pequeno">${queda >= 0 ? `Te quedan ${euros(queda)} para ${quedanDias} ${quedanDias === 1 ? "día" : "días"}: unos ${euros(queda / quedanDias)} al día.` : `Te has pasado ${euros(-queda)} este mes. Sin drama: el mes que viene se ajusta.`}</p>`;
+    }
+    if (ingresosMes.length) {
+      const ahorro = sumar(ingresosMes) - gastado;
+      html += `<div class="fila entre"><span>Ingresos</span><b>${euros(sumar(ingresosMes))}</b></div>
+      <div class="fila entre"><span>Ahorro del mes</span><b>${euros(ahorro)}</b></div>`;
+    }
+    return html;
+  }
   function editarMovimiento(m) {
     abrirHoja(`<h2>${esc(m.comercio || "Movimiento")}</h2>
     <p class="muted">${esc(fechaLarga(m.fecha))} · ${euros(Math.abs(Number(m.importe)))}${m.origen === "efectivo" ? " · efectivo" : ""}</p>
@@ -3899,20 +3866,22 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
     const gastosMes = movs.filter((m) => String(m.fecha).startsWith(mes) && Number(m.importe) < 0);
     const m0 = sinRevisar[0];
     el2.innerHTML = `<div class="pantalla">${atras}
-    <header class="cabecera"><h1>Dinero</h1><p class="muted">El banco se conecta en la fase 2 y los gastos entrarán solos. Mientras, lo que apuntes.</p></header>
+    <header class="cabecera"><h1>Dinero</h1><p class="muted">${todas2("bancos").some((b) => b.estado === "activo") ? "Los movimientos del banco entran solos cada día." : "Mientras el banco no esté conectado, cuenta lo que apuntes."}</p></header>
     ${m0 ? `<section class="tarjeta destacada col">
       <span class="etiqueta">Revisar gastos · ${sinRevisar.length === 1 ? "queda 1" : `quedan ${sinRevisar.length}`}</span>
       <div class="siguiente"><div class="titulo">${esc(m0.comercio || "Gasto")} · ${euros(Math.abs(Number(m0.importe)))}</div></div>
       <p class="muted">${esc(fechaCorta(m0.fecha))}${m0.origen === "efectivo" ? " · efectivo" : ""}</p>
       <div class="botones">${Object.entries(ETIQUETAS).map(([k, t]) => `<button class="boton" data-et="${k}" data-id="${esc(m0.id)}">${t}</button>`).join("")}</div>
       <p class="muted pequeno">Lo que elijas se recuerda para ese comercio.</p></section>` : '<section class="tarjeta suave"><p>Nada por revisar.</p></section>'}
-    <button class="boton principal ancho" data-accion="gasto">${icono("mas")} Apuntar un gasto</button>
-    <section class="tarjeta col"><h2>Este mes</h2>
+    <div class="botones"><button class="boton principal" data-accion="gasto">${icono("mas")} Gasto</button><button class="boton" data-accion="ingreso">${icono("mas")} Ingreso</button></div>
+    <section class="tarjeta col"><div class="fila entre"><h2>Este mes</h2><button class="enlace" data-accion="presupuesto">${ajustes().presupuesto ? "Cambiar presupuesto" : "Poner presupuesto"}</button></div>
+      ${bloquePresupuesto(gastosMes, movs.filter((m) => String(m.fecha).startsWith(mes) && Number(m.importe) > 0), c.fecha)}
       ${gastosMes.length ? `<div class="fila entre"><span>Gastos</span><b>${euros(sumar(gastosMes))}</b></div>
         ${Object.entries(ETIQUETAS).map(([k, t]) => `<div class="fila entre"><span>${t}</span><span>${euros(sumar(gastosMes.filter((m) => m.etiqueta === k)))}</span></div>`).join("")}` : '<p class="muted pequeno">Aún no hay gastos este mes.</p>'}
     </section>
+    ${tarjetaBanco()}
     ${movs.length ? `<section class="tarjeta"><h2>Movimientos</h2><div class="lista">${movs.slice(0, 60).map((m) => `<button class="fila-boton" data-mov="${esc(m.id)}">
-      <span class="crece"><span class="nombre">${esc(m.comercio || "Movimiento")}</span><br><span class="muted pequeno">${esc(fechaCorta(m.fecha))}${m.etiqueta ? ` · ${ETIQUETAS[m.etiqueta]}` : ""}${m.estado === "provisional" ? " · provisional" : ""}</span></span>
+      <span class="crece"><span class="nombre">${esc(m.comercio || "Movimiento")}</span><br><span class="muted pequeno">${esc(fechaCorta(m.fecha))}${m.etiqueta ? ` · ${ETIQUETAS[m.etiqueta]}` : ""}${m.estado === "provisional" ? m.origen === "aviso" ? " · del aviso del banco" : " · provisional" : m.origen === "banco" ? " · banco" : ""}</span></span>
       <b>${Number(m.importe) < 0 ? "" : "+"}${euros(Number(m.importe))}</b></button>`).join("")}</div></section>` : ""}
   </div>`;
     el2.onclick = (e) => {
@@ -3928,6 +3897,22 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
       }
       if (e.target.closest("[data-accion=gasto]")) {
         apuntarGasto();
+        return;
+      }
+      if (e.target.closest("[data-accion=ingreso]")) {
+        apuntarIngreso();
+        return;
+      }
+      if (e.target.closest("[data-accion=presupuesto]")) {
+        ponerPresupuesto();
+        return;
+      }
+      if (e.target.closest("[data-accion=banco-conectar]")) {
+        conectarBanco();
+        return;
+      }
+      if (e.target.closest("[data-accion=banco-sync]")) {
+        actualizarBanco();
         return;
       }
       const mv = e.target.closest("[data-mov]");
@@ -4082,24 +4067,25 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
   };
   function pintarCuandoDecidas(el2, tipo) {
     const t = CUANDO[tipo];
+    const ya = todas2("habitos").find((h) => h.estado !== "finalizado" && mismoNombre(h.nombre, t.plantilla.nombre));
     el2.innerHTML = `<div class="pantalla">${atras}
     <header class="cabecera"><h1>${t.titulo}</h1><p>${t.texto}</p></header>
-    <button class="boton principal ancho" data-accion="empezar">Quiero empezar</button>
-    <p class="muted pequeno">Se crea un hábito con versión mínima. Lo ajustas tú antes de guardarlo.</p>
+    ${ya ? `<a class="boton principal ancho" href="#/habitos/${encodeURIComponent(ya.id)}">Ya lo empezaste: ver «${esc(ya.nombre)}»${ya.estado === "pausado" ? " (en pausa)" : ""}</a>` : `<button class="boton principal ancho" data-accion="empezar">Quiero empezar</button>
+    <p class="muted pequeno">Se crea un hábito con versión mínima. Lo ajustas tú antes de guardarlo.</p>`}
   </div>`;
     el2.onclick = (e) => {
       if (e.target.closest("[data-accion=empezar]")) editarHabito(null, { plantilla: t.plantilla });
     };
   }
-  function pintar7(el2, partes) {
+  function pintar5(el2, partes) {
     const m = partes[0];
     if (!m) {
-      pintarInicio2(el2);
+      pintarInicio3(el2);
       return;
     }
     if (m === "ganas") pintarModulo(el2);
     else if (m === "relacion") pintarRelacion(el2);
-    else if (m === "ajustes") pintar6(el2, partes.slice(1));
+    else if (m === "ajustes") pintar4(el2, partes.slice(1));
     else if (m === "finanzas") pintarFinanzas(el2);
     else if (m === "gimnasio") pintarVisitas(el2, "gimnasio");
     else if (m === "familia") pintarVisitas(el2, "madre");
@@ -4109,6 +4095,527 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
     else if (m === "apuntes") pintarApuntes(el2);
     else if (CUANDO[m]) pintarCuandoDecidas(el2, m);
     else location.replace("#/espacio");
+  }
+
+  // ../365/js/vistas/hoy.js
+  alTerminarTemporizador("libre", (t, completo) => {
+    if (completo) aviso("Hecho. Lo que venga ahora es extra.");
+  });
+  function tarjetaFase1() {
+    return `<section class="tarjeta destacada col" data-fase1>
+    <span class="etiqueta">Fase 1 · propuesta</span>
+    <h2>Mañanas tranquilas</h2>
+    <p>Tres cosas pequeñas al levantarte. Nada más hasta que salgan casi solas.</p>
+    <label class="interruptor"><span>Agua · un vaso</span><input type="checkbox" name="agua" checked></label>
+    <label class="interruptor"><span>Meditación · 5 minutos</span><input type="checkbox" name="meditacion" checked></label>
+    <label class="interruptor"><span>Diario · una pregunta</span><input type="checkbox" name="diario" checked></label>
+    <label class="campo">Me levanto a las<input type="time" name="hora" value="06:00"></label>
+    <p class="muted pequeno">El gimnasio y las visitas se apuntan solos cuando configures los sitios. Sin exigencia.</p>
+    <button class="boton principal ancho" data-accion="aprobar-fase1">Empezar la fase 1</button>
+    <button class="enlace" data-accion="descartar-fase1">Ahora no, prefiero montarlo yo</button>
+  </section>`;
+  }
+  function tarjetaSiguiente(s) {
+    let botones = "";
+    let detalle = s.detalle || "";
+    let etiqueta = "Lo siguiente";
+    if (s.tipo === "habito") {
+      const h = s.habito;
+      const id = esc(h.id);
+      etiqueta = `Lo siguiente${h.hora ? ` · ${h.hora}` : ""}`;
+      detalle = [h.duracion_min ? minutosTexto(h.duracion_min) : null, h.minimo ? `mínimo: ${h.minimo}` : null].filter(Boolean).join(" · ");
+      const minimo = h.minimo && h.auto !== "diario" ? `<button class="boton suave" data-accion="minimo" data-id="${id}">Solo el mínimo</button>` : "";
+      if (h.auto === "diario") botones = `<button class="boton principal" data-accion="empezar" data-id="${id}">${icono("escribir")} Escribir</button>`;
+      else if (h.temporizador) botones = `<button class="boton principal" data-accion="empezar" data-id="${id}">${icono("play")} Empezar</button>${minimo}`;
+      else botones = `<button class="boton principal" data-accion="empezar" data-id="${id}">${icono("check")} Hecho</button>${minimo}`;
+    } else if (s.tipo === "tarde") {
+      botones = '<button class="boton principal" data-accion="tarde-arrancar">Empiezo con 2 minutos</button><button class="boton suave" data-accion="tarde-descanso">Hoy descanso</button>';
+    } else if (s.tipo === "seguimiento") {
+      botones = `<button class="boton principal" data-accion="seguimiento" data-id="${esc(s.marca.id)}">Responder</button>`;
+    } else if (s.tipo === "marca") {
+      botones = `<button class="boton principal" data-accion="completar-marca" data-id="${esc(s.marca.id)}">Completar</button>`;
+    }
+    const suave = s.tipo === "libre" || s.tipo === "evento";
+    return `<section class="tarjeta ${suave ? "suave" : "destacada"} siguiente" data-siguiente="${s.tipo}">
+    <span class="etiqueta">${esc(etiqueta)}</span>
+    <div class="titulo">${esc(s.titulo)}</div>
+    ${detalle ? `<p class="muted">${esc(detalle)}</p>` : ""}
+    ${botones ? `<div class="botones">${botones}</div>` : ""}
+  </section>`;
+  }
+  function filaHabito(h, c) {
+    const r = c.indice.get(`${h.id}|${c.fecha}`);
+    const est = r ? r.estado : "";
+    let txt = "";
+    if (r && r.estado === "hecho") txt = `Hecho a las ${horaMin(r.ts)}${r.origen === "auto" ? " · se apuntó solo" : r.origen === "temporizador" ? " · con temporizador" : ""}`;
+    else if (r && r.estado === "minimo") txt = "Versión mínima";
+    else if (r) txt = "Hoy no";
+    const auto = h.auto && h.auto !== "diario";
+    const detalle = txt || [detalleHabito(h), auto ? "se apunta solo" : null].filter(Boolean).join(" · ");
+    const ic = est === "hecho" || est === "minimo" ? icono("check") : est === "no" ? icono("x") : auto ? `<span class="muted">${icono("ubicacion")}</span>` : "";
+    return `<div class="habito ${est ? "hecho" : ""}" data-habito="${esc(h.id)}">
+    <button class="check ${est}" data-accion="marcar" data-id="${esc(h.id)}" aria-label="${esc(h.nombre)}: ${est ? "quitar la marca" : "marcar como hecho"}">${ic}</button>
+    <div class="info"><div class="nombre">${esc(h.nombre)}${h.cuenta === false ? ' <span class="insignia">sin presión</span>' : ""}</div><div class="detalle">${esc(detalle)}</div></div>
+    <button class="mas" data-accion="opciones" data-id="${esc(h.id)}" aria-label="Más opciones de ${esc(h.nombre)}">${icono("puntos")}</button>
+  </div>`;
+  }
+  function tarjetaHabitos(lista2, c, prog) {
+    const pct = prog.total ? Math.round(100 * prog.hechos / prog.total) : 0;
+    return `<section class="tarjeta" data-hoy-habitos>
+    <div class="fila entre"><h2>Hoy</h2>${prog.total ? `<span class="muted" data-progreso>${prog.hechos} de ${prog.total}</span>` : ""}</div>
+    ${prog.total ? `<div class="progreso" aria-hidden="true"><span style="width:${pct}%"></span></div>` : ""}
+    <div class="lista">${lista2.map((h) => filaHabito(h, c)).join("")}</div>
+  </section>`;
+  }
+  function tarjetaTareas(ts) {
+    return `<section class="tarjeta"><h2>Para hoy</h2><div class="lista">${ts.map((t) => `<div class="habito">
+    <button class="check" data-accion="tarea" data-id="${esc(t.id)}" aria-label="Hecha: ${esc(t.titulo)}"></button>
+    <div class="info"><div class="nombre">${esc(t.titulo)}</div></div></div>`).join("")}</div></section>`;
+  }
+  function planJV(c, ds, hora) {
+    if (!(ds === 3 || ds === 4) || hora < 16 || !c.ajustes.planJV) return "";
+    const d = c.dias.find((x) => x.fecha === c.fecha);
+    return `<section class="tarjeta aviso col"><span class="etiqueta">Plan para esta noche</span>
+    <p>Si me entran ganas esta noche, entonces…</p>
+    <textarea name="plan" rows="2" placeholder="Por ejemplo: llamo a alguien y salgo a andar 10 minutos">${esc(d && d.plan || c.ajustes.planJVTexto || "")}</textarea>
+    <button class="boton peq" data-accion="guardar-plan">Guardar el plan</button></section>`;
+  }
+  function tarjetaEvento(ev, f) {
+    const d = fechaDeTs(ev.inicio);
+    const cuando = d === f ? "Hoy" : d === sumarDias(f, 1) ? "Mañana" : fechaCorta(d);
+    return `<section class="tarjeta suave fila"><span class="icono-medio">${icono("calendario")}</span>
+    <div class="crece"><span class="etiqueta">Próximo en la agenda</span><div>${esc(ev.titulo)}</div><div class="muted pequeno">${cuando} · ${horaMin(ev.inicio)}</div></div></section>`;
+  }
+  function elegirArranque(fecha) {
+    abrirHoja(`<h2>¿Con qué empiezas?</h2>
+    <p class="muted">Dos minutos. Si luego sigues, bien. Si no, también cuenta.</p>
+    <div class="col">
+      <button class="boton ancho" data-arr="ducha">${icono("ducha")} Ducha y ropa cómoda</button>
+      <button class="boton ancho" data-arr="leer">${icono("lectura")} Leer 2 minutos</button>
+      <button class="boton ancho" data-arr="ordenar">${icono("orden")} Ordenar 2 minutos</button>
+      <button class="boton ancho" data-arr="andar">${icono("andar")} Salir a andar</button>
+      <button class="boton ancho" data-arr="otra">Otra cosa</button>
+    </div>`, (c, cerrar) => {
+      c.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-arr]");
+        if (!b) return;
+        cerrar();
+        guardarDia(fecha, { tarde: "arrancada", tarde_ts: (/* @__PURE__ */ new Date()).toISOString() });
+        const k = b.dataset.arr;
+        if (k === "leer" || k === "ordenar") empezarTemporizador({ tipo: "libre", minutos: 2, titulo: k === "leer" ? "Leer" : "Ordenar", subtitulo: "2 minutos" });
+        else aviso("Tarde arrancada");
+      });
+    });
+  }
+  function pintar6(el2) {
+    const c = contexto();
+    const f = c.fecha;
+    const p = c.perfil;
+    const n = p && p.inicio ? diaN(p.inicio, f) : 1;
+    const ds = diaSemana(f);
+    const hora = (/* @__PURE__ */ new Date()).getHours();
+    const jv = (ds === 3 || ds === 4) && hora >= 16;
+    const propuesta = !c.fases.length && !c.habitos.length && !c.ajustes.fase1Descartada;
+    app.vistaEstable = propuesta;
+    const tarde = tardeDe(c);
+    const sig = loSiguiente({ habitos: c.habitos, indice: c.indice, fecha: f, ahoraMs: c.ahoraMs, marcas: c.marcas, eventos: c.eventos, tarde, umbralSeguimientoMs: msMin(20) });
+    const lista2 = habitosDelDia(c.habitos, f);
+    const prog = progresoDia(c.habitos, c.indice, f);
+    const ev = proximoEvento(c.eventos, c.ahoraMs);
+    const sinRevisar = c.movimientos.filter((m) => Number(m.importe) < 0 && !m.etiqueta).length;
+    const tareasHoy = c.tareas.filter((t) => !t.hecha && t.fecha === f);
+    const rev = propuesta ? null : revisionPendiente();
+    el2.innerHTML = `<div class="pantalla">
+    <header class="cabecera"><span class="etiqueta">${esc(textoDia(n))}</span><h1>${esc(fechaLarga(f))}</h1></header>
+    <p class="frase">${esc(fraseDelDia(f))}</p>
+    ${rev ? htmlRevision(rev) : ""}
+    ${propuesta ? tarjetaFase1() : tarjetaSiguiente(sig)}
+    ${lista2.length ? tarjetaHabitos(lista2, c, prog) : ""}
+    ${tareasHoy.length ? tarjetaTareas(tareasHoy) : ""}
+    ${planJV(c, ds, hora)}
+    ${(() => {
+      const b = todas2("bancos")[0];
+      if (!bancoPorRenovar(b)) return "";
+      const d = diasPermiso(b);
+      return `<section class="tarjeta aviso col" data-banco-renovar><span class="etiqueta">Banco</span><p>${b.estado === "caducado" || d <= 0 ? "El permiso del banco ha caducado." : `El permiso del banco caduca en ${d} ${d === 1 ? "día" : "días"}.`} Renovarlo es un minuto.</p><button class="boton principal" data-accion="banco-renovar">Renovar</button></section>`;
+    })()}
+    ${ev && !(sig.tipo === "evento" && sig.evento.id === ev.id) ? tarjetaEvento(ev, f) : ""}
+    <button class="boton ancho ${jv ? "aviso ganas-grande" : "suave"}" data-accion="ganas">${icono("ganas")} Tengo ganas</button>
+    <div class="acciones-rapidas">
+      <button class="boton" data-accion="diario">${icono("diario")}<span>Diario</span></button>
+      <button class="boton" data-accion="apuntar">${icono("apuntar")}<span>Apuntar</span></button>
+      <button class="boton" data-accion="gastos">${icono("gastos")}<span>Gastos${sinRevisar ? ` · ${sinRevisar}` : ""}</span></button>
+    </div>
+    ${lineaSync()}
+  </div>`;
+    el2.onclick = (e) => {
+      if (manejarRevision(e, el2)) return;
+      const b = e.target.closest("[data-accion]");
+      if (!b) return;
+      const a = b.dataset.accion;
+      const id = b.dataset.id;
+      const h = id ? una2("habitos", id) : null;
+      if (a === "marcar" && h) marcarRapido(h, f);
+      else if (a === "opciones" && h) opcionesHabito(h, f);
+      else if (a === "empezar" && h) empezarHabito(h);
+      else if (a === "minimo" && h) empezarHabito(h, { minimo: true });
+      else if (a === "tarde-arrancar") elegirArranque(f);
+      else if (a === "tarde-descanso") {
+        guardarDia(f, { tarde: "descanso", tarde_ts: (/* @__PURE__ */ new Date()).toISOString() });
+        aviso("Apuntado: tarde de descanso");
+      } else if (a === "seguimiento") location.hash = `#/ganas/${id}/seguimiento`;
+      else if (a === "completar-marca") location.hash = `#/ganas/${id}`;
+      else if (a === "ganas") location.hash = "#/ganas";
+      else if (a === "diario") location.hash = "#/diario";
+      else if (a === "apuntar") abrirApuntar();
+      else if (a === "gastos" || a === "banco-renovar") location.hash = "#/espacio/finanzas";
+      else if (a === "tarea") {
+        const t = una2("tareas", id);
+        if (t) {
+          guardar("tareas", { ...t, hecha: true });
+          aviso("Tarea hecha", { accion: "Deshacer", alPulsar: () => guardar("tareas", { ...t, hecha: false }) });
+        }
+      } else if (a === "guardar-plan") {
+        const ta = el2.querySelector("textarea[name=plan]");
+        guardarDia(f, { plan: ta.value.trim() || null });
+        ta.blur();
+        aviso("Plan guardado");
+      } else if (a === "aprobar-fase1") {
+        const card = b.closest("[data-fase1]");
+        const q = (nombre) => card.querySelector(`[name=${nombre}]`);
+        if (!q("agua").checked && !q("meditacion").checked && !q("diario").checked) {
+          aviso("Elige al menos una");
+          return;
+        }
+        try {
+          crearFase1({ hora: q("hora").value || "06:00", agua: q("agua").checked, meditacion: q("meditacion").checked, diario: q("diario").checked });
+          aviso("Fase 1 en marcha. Hoy es el día 1.");
+          pintar6(el2);
+        } catch (x) {
+          aviso(x.message);
+        }
+      } else if (a === "descartar-fase1") {
+        try {
+          guardarAjustes({ fase1Descartada: true });
+        } catch (_) {
+        }
+        location.hash = "#/habitos";
+      }
+    };
+  }
+
+  // ../365/js/vistas/habitos.js
+  var habitos_exports = {};
+  __export(habitos_exports, {
+    pintar: () => pintar7
+  });
+  var SIGUIENTES = [
+    { nombre: "Lectura y pantallas", objetivo: "Leer 10 minutos por la tarde y bajar redes.", plantillas: ["lectura"], areas: ["lectura", "redes"] },
+    { nombre: "Casa y comida", objetivo: "Un poco de orden cada semana y comer algo mejor.", plantillas: ["orden"], areas: ["orden", "alimentacion"] }
+  ];
+  function mensajeFase(ev) {
+    if (ev.estado === "estable") return "Tres semanas seguidas por encima del 80 %. Está saliendo casi solo. ¿Lo consolidamos y piensas en la siguiente fase?";
+    if (ev.estado === "atascada") {
+      const a = ev.atascados[0];
+      return `«${a.habito.nombre}» cuesta: ${a.hechos} de ${a.previstos} días en las dos últimas semanas. No es falta de voluntad, algo frena el inicio. ¿Probamos la versión mínima, otra hora o una pausa?`;
+    }
+    if (ev.estado === "vacia") return "Esta fase no tiene hábitos activos.";
+    return "En marcha. La fase avanza cuando lo de ahora sale casi solo, no por calendario.";
+  }
+  function tarjetaFase(fase, c) {
+    const ev = evaluarFase(fase, c.habitos, c.indice, c.fecha);
+    const pospuesta = fase.evaluacion && fase.evaluacion.startsWith("seguir:") && fase.evaluacion.slice(7) > c.fecha;
+    let botones = "";
+    if (!pospuesta && ev.estado === "estable") botones = '<button class="boton principal" data-accion="consolidar">Consolidar</button><button class="boton suave" data-accion="seguir">Seguir así</button>';
+    if (!pospuesta && ev.estado === "atascada") botones = `<button class="boton principal" data-accion="ajustar" data-id="${esc(ev.atascados[0].habito.id)}">Ajustar «${esc(ev.atascados[0].habito.nombre)}»</button><button class="boton suave" data-accion="seguir">Seguir así</button>`;
+    const hs = c.habitos.filter((h) => h.fase_id === fase.id && h.estado !== "finalizado");
+    return `<section class="tarjeta destacada col">
+    <span class="etiqueta">Fase activa · semana ${ev.semana || 1} · desde el ${esc(fechaCorta(fase.inicio || c.fecha))}</span>
+    <h2>${esc(fase.nombre)}</h2>
+    ${fase.objetivo ? `<p class="muted">${esc(fase.objetivo)}</p>` : ""}
+    <p>${esc(pospuesta ? "Revisada. Te vuelvo a proponer en unos días." : mensajeFase(ev))}</p>
+    ${hs.length ? `<p class="pequeno muted">${hs.map((h) => esc(h.nombre)).join(" · ")}</p>` : ""}
+    ${botones ? `<div class="botones">${botones}</div>` : ""}
+  </section>`;
+  }
+  function filaLista(h, c) {
+    const desde = sumarDias(c.fecha, -28);
+    const ayer = sumarDias(c.fecha, -1);
+    const cu = cumplimiento(h, c.indice, h.inicio && h.inicio > desde ? h.inicio : desde, hastaCon(h, c.indice, c.fecha));
+    const det = [diasTexto(h.dias), h.hora, h.duracion_min ? minutosTexto(h.duracion_min) : null].filter(Boolean).join(" · ");
+    const etiqueta = h.estado === "pausado" ? "Pausado" : cu.pct == null ? "Nuevo" : `${cu.hechos} de ${cu.previstos}`;
+    return `<a class="habito" href="#/habitos/${encodeURIComponent(h.id)}">
+    <div class="info"><div class="nombre">${esc(h.nombre)}</div><div class="detalle">${esc(det)}</div></div>
+    <span class="insignia">${esc(etiqueta)}</span>
+  </a>`;
+  }
+  function pintarLista(el2) {
+    const c = contexto();
+    const fase = c.faseActiva;
+    const vivos = c.habitos.filter((h) => h.estado !== "finalizado");
+    const finalizados = c.habitos.filter((h) => h.estado === "finalizado");
+    const grupos = AREAS.map((a) => ({ a, hs: ordenarHabitos(vivos.filter((h) => h.area === a.id)) })).filter((g) => g.hs.length);
+    const otros = vivos.filter((h) => !AREAS.some((a) => a.id === h.area));
+    if (otros.length) grupos.push({ a: { nombre: "Otros" }, hs: otros });
+    const anteriores = c.fases.filter((f) => f.estado !== "activa").sort((a, b) => String(b.inicio).localeCompare(String(a.inicio)));
+    el2.innerHTML = `<div class="pantalla">
+    <header class="cabecera fila entre"><h1>Hábitos</h1><button class="boton peq principal" data-accion="nuevo">${icono("mas")} Añadir</button></header>
+    ${(() => {
+      const rev = revisionPendiente();
+      return rev ? htmlRevision(rev) : "";
+    })()}
+    ${fase ? tarjetaFase(fase, c) : `<section class="tarjeta suave col"><h2>Sin fase activa</h2>
+      <p class="muted">Una fase es un grupo pequeño de hábitos que se trabaja junto hasta que sale casi solo.</p>
+      <button class="boton principal" data-accion="nueva-fase">Empezar una fase</button></section>`}
+    ${grupos.length ? grupos.map((g) => `<section class="tarjeta"><span class="etiqueta">${esc(g.a.nombre)}</span><div class="lista">${g.hs.map((h) => filaLista(h, c)).join("")}</div></section>`).join("") : '<p class="muted centro">Aún no hay hábitos. Empieza por uno pequeño.</p>'}
+    <p class="muted pequeno">El número es cuántos días lo hiciste de los que tocaban en las últimas 4 semanas. Un día sin hacer no borra nada.</p>
+    ${finalizados.length ? `<details class="tarjeta suave"><summary>Finalizados (${finalizados.length})</summary><div class="lista">${finalizados.map((h) => filaLista(h, c)).join("")}</div></details>` : ""}
+    ${anteriores.length ? `<details class="tarjeta suave"><summary>Fases anteriores (${anteriores.length})</summary>${anteriores.map((f) => `<p><b>${esc(f.nombre)}</b> <span class="muted pequeno">${esc(fechaCorta(f.inicio || c.fecha))}${f.fin ? ` a ${esc(fechaCorta(f.fin))}` : ""} · ${esc(f.estado)}</span></p>`).join("")}</details>` : ""}
+  </div>`;
+    el2.onclick = async (e) => {
+      if (manejarRevision(e, el2)) return;
+      const b = e.target.closest("[data-accion]");
+      if (!b) return;
+      const a = b.dataset.accion;
+      if (a === "nuevo") editarHabito(null);
+      else if (a === "nueva-fase") nuevaFase();
+      else if (a === "ajustar") {
+        const h = una2("habitos", b.dataset.id);
+        if (h) editarHabito(h);
+      } else if (a === "seguir" && fase) {
+        guardar("fases", { ...fase, evaluacion: `seguir:${sumarDias(c.fecha, 7)}` });
+        aviso("Seguimos así");
+      } else if (a === "consolidar" && fase) {
+        if (!await confirmar2({ titulo: `¿Consolidar «${fase.nombre}»?`, texto: "Los hábitos siguen activos. La fase queda como conseguida y puedes empezar otra.", si: "Consolidar" })) return;
+        guardar("fases", { ...fase, estado: "consolidada", fin: c.fecha, evaluacion: "Estable: 80 % o más durante 3 semanas" });
+        nuevaFase();
+      }
+    };
+  }
+  function nuevaFase() {
+    const activa = todas2("fases").find((f) => f.estado === "activa");
+    const pausados = ordenarHabitos(todas2("habitos").filter((h) => h.estado === "pausado"));
+    abrirHoja(`<h2>Nueva fase</h2>
+    ${activa ? `<p class="tarjeta aviso pequeno">Ya tienes «${esc(activa.nombre)}» activa. Al empezar otra, esa queda cerrada.</p>` : ""}
+    <div class="chips">${SIGUIENTES.map((s, i) => `<button type="button" class="chip" data-sug="${i}">${esc(s.nombre)}</button>`).join("")}</div>
+    <form class="col" data-fase>
+      <label class="campo">Nombre<input type="text" name="nombre" maxlength="60" required></label>
+      <label class="campo">Objetivo<input type="text" name="objetivo" maxlength="140"></label>
+      ${pausados.length ? `<span class="etiqueta">Reactivar lo que dejaste en pausa</span>
+      ${pausados.map((h) => `<label class="interruptor"><span>${esc(h.nombre)}</span><input type="checkbox" data-reactivar value="${esc(h.id)}"></label>`).join("")}` : ""}
+      <span class="etiqueta">Hábitos nuevos (puedes añadir más luego)</span>
+      ${PLANTILLAS.filter((p) => p.clave !== "gimnasio" && !todas2("habitos").some((h) => h.estado !== "finalizado" && mismoNombre(h.nombre, p.nombre))).map((p) => `<label class="interruptor"><span>${esc(p.nombre)}</span><input type="checkbox" name="p-${p.clave}"></label>`).join("")}
+      <p class="error pequeno" role="alert"></p>
+      <button class="boton principal ancho" type="submit">Empezar la fase</button>
+    </form>`, (c, cerrar) => {
+      const f = c.querySelector("[data-fase]");
+      c.addEventListener("click", (e) => {
+        const s = e.target.closest("[data-sug]");
+        if (!s) return;
+        const sug = SIGUIENTES[Number(s.dataset.sug)];
+        f.nombre.value = sug.nombre;
+        f.objetivo.value = sug.objetivo;
+        PLANTILLAS.forEach((p) => {
+          const cb = f[`p-${p.clave}`];
+          if (cb) cb.checked = sug.plantillas.includes(p.clave);
+        });
+        f.querySelectorAll("[data-reactivar]").forEach((cb) => {
+          const h = una2("habitos", cb.value);
+          cb.checked = !!h && sug.areas.includes(h.area) && !/cigarr|tabac|fumar/i.test(h.nombre);
+        });
+      });
+      f.onsubmit = (e) => {
+        e.preventDefault();
+        const nombre = f.nombre.value.trim();
+        if (!nombre) {
+          f.querySelector(".error").textContent = "Ponle un nombre.";
+          return;
+        }
+        const fecha = hoy();
+        if (activa) guardar("fases", { ...activa, estado: "cerrada", fin: fecha });
+        const fase = guardar("fases", { id: uuid(), nombre, objetivo: f.objetivo.value.trim() || null, inicio: fecha, fin: null, semanas: 4, estado: "activa", evaluacion: null });
+        for (const cb of f.querySelectorAll("[data-reactivar]:checked")) {
+          const h = una2("habitos", cb.value);
+          if (h) guardar("habitos", { ...h, estado: "activo", fase_id: fase.id });
+        }
+        let orden = todas2("habitos").length;
+        for (const p of PLANTILLAS) {
+          const cb = f[`p-${p.clave}`];
+          if (!cb || !cb.checked) continue;
+          const { clave: clave2, ...datos2 } = p;
+          guardar("habitos", { ...datos2, id: uuid(), auto: datos2.auto || null, hora: datos2.hora || null, estado: "activo", inicio: fecha, fase_id: fase.id, orden: orden++ });
+        }
+        cerrar();
+        aviso(`Fase «${nombre}» en marcha`);
+      };
+    });
+  }
+  function calendario(h, indice, fecha) {
+    const lunes = lunesDe(fecha);
+    const ini = sumarDias(lunes, -7 * 7);
+    let celdas = "";
+    for (let s = 0; s < 8; s++) {
+      for (let d = 0; d < 7; d++) {
+        const f = sumarDias(ini, s * 7 + d);
+        let cls = "f";
+        let t = "";
+        if (f <= fecha && previstoEn(h, f)) {
+          const r = indice.get(`${h.id}|${f}`);
+          cls = !r ? "p" : r.estado === "hecho" ? "h" : r.estado === "minimo" ? "m" : "x";
+          t = !r ? "sin marcar" : r.estado === "hecho" ? "hecho" : r.estado === "minimo" ? "mínimo" : "no";
+        }
+        celdas += `<span class="${cls}" style="grid-row:${d + 1};grid-column:${s + 1}" title="${f}${t ? `: ${t}` : ""}"></span>`;
+      }
+    }
+    return `<div class="cal-habito">${DIAS_CORTOS.map((x, i) => `<b style="grid-row:${i + 1};grid-column:9">${x}</b>`).join("")}${celdas}</div>
+    <div class="leyenda pequeno muted"><span><i class="h"></i>Hecho</span><span><i class="m"></i>Mínimo</span><span><i class="x"></i>No</span><span><i class="p"></i>Sin marcar</span></div>`;
+  }
+  function pintarDetalle(el2, id) {
+    const h = una2("habitos", id);
+    if (!h) {
+      location.hash = "#/habitos";
+      return;
+    }
+    const c = contexto();
+    const ayer = sumarDias(c.fecha, -1);
+    const d28 = sumarDias(c.fecha, -28);
+    const hasta = hastaCon(h, c.indice, c.fecha);
+    const c28 = cumplimiento(h, c.indice, h.inicio && h.inicio > d28 ? h.inicio : d28, hasta);
+    const total = cumplimiento(h, c.indice, h.inicio || d28, hasta);
+    const fase = h.fase_id ? una2("fases", h.fase_id) : null;
+    const pct = c28.pct || 0;
+    const autoTxt = { diario: "al escribir el diario", gimnasio: "al llegar al gimnasio", madre: "al llegar a casa de tu madre", trabajo: "al llegar al trabajo", casa: "al llegar a casa" }[h.auto];
+    const dato = (k, v) => v ? `<div class="fila entre"><span class="muted">${k}</span><span>${esc(v)}</span></div>` : "";
+    el2.innerHTML = `<div class="pantalla">
+    <a class="enlace" href="#/habitos">${icono("atras")} Hábitos</a>
+    <header class="cabecera"><span class="etiqueta">${esc(nombreArea(h.area))}${h.estado !== "activo" ? ` · ${esc(h.estado)}` : ""}</span><h1>${esc(h.nombre)}</h1>
+      <p class="muted">${esc([diasTexto(h.dias), h.hora || "sin hora", h.duracion_min ? minutosTexto(h.duracion_min) : null].filter(Boolean).join(" · "))}</p></header>
+    <section class="tarjeta col">
+      <div class="fila entre"><span>Últimas 4 semanas</span><b>${c28.previstos ? `${c28.hechos} de ${c28.previstos} días` : "Aún sin días"}</b></div>
+      <div class="progreso" aria-hidden="true"><span style="width:${pct}%"></span></div>
+      <div class="fila entre muted pequeno"><span>Desde que empezó</span><span>${total.hechos} de ${total.previstos}${total.minimos ? ` · ${total.minimos} en versión mínima` : ""}</span></div>
+    </section>
+    <section class="tarjeta col"><span class="etiqueta">Últimas 8 semanas</span>${calendario(h, c.indice, c.fecha)}</section>
+    <section class="tarjeta col">
+      ${dato("Versión mínima", h.minimo)}${dato("Para qué", h.objetivo)}${dato("Empezó", h.inicio ? fechaCorta(h.inicio) : "")}
+      ${dato("Fase", fase ? fase.nombre : "")}${dato("Se apunta solo", autoTxt || "")}${dato("Temporizador", h.temporizador ? "Sí" : "")}${dato("Cuenta en el día", h.cuenta === false ? "No, sin presión" : "Sí")}
+    </section>
+    <button class="boton ancho" data-accion="hoy-marcar">Marcar hoy</button>
+    <div class="botones"><button class="boton" data-accion="editar">Editar</button><button class="boton" data-accion="pausar">${h.estado === "pausado" ? "Reanudar" : "Pausar"}</button></div>
+    <div class="botones"><button class="boton" data-accion="finalizar">${h.estado === "finalizado" ? "Reactivar" : "Finalizar"}</button><button class="boton peligro" data-accion="eliminar">Eliminar</button></div>
+  </div>`;
+    el2.onclick = async (e) => {
+      const b = e.target.closest("[data-accion]");
+      if (!b) return;
+      const a = b.dataset.accion;
+      if (a === "editar") editarHabito(h);
+      else if (a === "hoy-marcar") opcionesHabito(h, c.fecha);
+      else if (a === "pausar") {
+        guardar("habitos", { ...h, estado: h.estado === "pausado" ? "activo" : "pausado" });
+        aviso(h.estado === "pausado" ? "Reanudado" : "En pausa. No sale en HOY hasta que lo reanudes.");
+      } else if (a === "finalizar") {
+        if (h.estado === "finalizado") {
+          guardar("habitos", { ...h, estado: "activo" });
+          aviso("Reactivado");
+          return;
+        }
+        if (await confirmar2({ titulo: `¿Finalizar «${h.nombre}»?`, texto: "Deja de salir en HOY. El historial se queda.", si: "Finalizar" })) {
+          guardar("habitos", { ...h, estado: "finalizado" });
+          aviso("Finalizado");
+        }
+      } else if (a === "eliminar") {
+        if (await eliminarHabito(h)) location.hash = "#/habitos";
+      }
+    };
+  }
+  function pintar7(el2, partes) {
+    if (partes[0]) pintarDetalle(el2, decodeURIComponent(partes[0]));
+    else pintarLista(el2);
+  }
+
+  // ../365/js/vistas/evolucion.js
+  var evolucion_exports = {};
+  __export(evolucion_exports, {
+    pintar: () => pintar8
+  });
+  var vacio = '<p class="muted pequeno">Aún no hay datos.</p>';
+  var fila = (k, v) => `<div class="fila entre"><span>${k}</span><b>${v}</b></div>`;
+  function semana(c, ini, fin) {
+    let total = 0;
+    let hechos = 0;
+    for (let x = ini; x <= fin; x = sumarDias(x, 1)) {
+      const p = progresoDia(c.habitos, c.indice, x);
+      total += p.total;
+      hechos += p.hechos;
+    }
+    return { total, hechos };
+  }
+  function pintar8(el2) {
+    const c = contexto();
+    const f = c.fecha;
+    const inicio = c.perfil && c.perfil.inicio || f;
+    const mes = f.slice(0, 7);
+    const ayer = sumarDias(f, -1);
+    const lunes0 = lunesDe(inicio);
+    let celdas = "";
+    for (let s = 0; s < 53; s++) {
+      for (let d = 0; d < 7; d++) {
+        const x = sumarDias(lunes0, s * 7 + d);
+        const cls = x < inicio ? "fuera" : x > f ? "futuro" : `n${nivelDia(c.habitos, c.indice, x)}`;
+        celdas += `<span class="${cls}" title="${x}"></span>`;
+      }
+    }
+    const semanaActual = Math.floor(Math.max(0, diasEntre(lunes0, f)) / 7);
+    const lunes = lunesDe(f);
+    const esta = semana(c, lunes, f);
+    const anterior = semana(c, sumarDias(lunes, -7), sumarDias(lunes, -1));
+    const activos = ordenarHabitos(c.habitos.filter((h) => h.estado === "activo"));
+    const continuidad = activos.map((h) => {
+      const d = sumarDias(f, -28);
+      const cu = cumplimiento(h, c.indice, h.inicio && h.inicio > d ? h.inicio : d, hastaCon(h, c.indice, f));
+      return `<div class="col" style="gap:4px"><div class="fila entre"><span>${esc(h.nombre)}</span><span class="muted pequeno">${cu.previstos ? `${cu.hechos} de ${cu.previstos}` : "nuevo"}</span></div>
+      <div class="progreso" aria-hidden="true"><span style="width:${cu.pct || 0}%"></span></div></div>`;
+    }).join("");
+    const delMes = (r) => String(r.fecha).startsWith(mes) && cuentaComoHecho(r);
+    const idsArea = (area) => new Set(c.habitos.filter((h) => h.area === area).map((h) => h.id));
+    const med = idsArea("meditacion");
+    const lec = idsArea("lectura");
+    const diasMeditacion = new Set(c.registros.filter((r) => !r.deleted && med.has(r.habito_id) && delMes(r)).map((r) => r.fecha)).size;
+    const diasDiario = new Set(c.diario.filter((d) => d.tipo !== "relacion" && String(d.fecha).startsWith(mes)).map((d) => d.fecha)).size;
+    const minLectura = c.registros.filter((r) => !r.deleted && lec.has(r.habito_id) && cuentaComoHecho(r)).reduce((a, r) => a + (Number(r.minutos) || 0), 0);
+    const gym = visitas(c.fichajes, "gimnasio").filter((v) => v.fecha.startsWith(mes));
+    const gymMin = gym.filter((v) => v.minutos != null).map((v) => v.minutos);
+    const media = gymMin.length ? Math.round(gymMin.reduce((a, b) => a + b, 0) / gymMin.length) : null;
+    const tardes = resumenTardes({ fichajes: c.fichajes, registros: c.registros, dias: c.dias, ahoraMs: c.ahoraMs }, lunes, f);
+    const hayTardes = tardes.arrancadas + tardes.descanso + tardes.sinDecidir > 0;
+    const ganas = ganasPorSemana(c.marcas, f, 8);
+    const maxG = Math.max(1, ...ganas.map((s) => s.n));
+    const hayGanas = ganas.some((s) => s.n);
+    const gastosMes = c.movimientos.filter((m) => String(m.fecha).startsWith(mes) && Number(m.importe) < 0);
+    const suma = (lst) => lst.reduce((a, m) => a + Math.abs(Number(m.importe) || 0), 0);
+    const ingresosMes = c.movimientos.filter((m) => String(m.fecha).startsWith(mes) && Number(m.importe) > 0);
+    el2.innerHTML = `<div class="pantalla">
+    <header class="cabecera"><h1>Evolución</h1><p class="muted">Solo lo que ha pasado de verdad. Un día sin hacer no borra nada.</p></header>
+    <section class="tarjeta col"><div class="fila entre"><h2>Tu año</h2><span class="muted pequeno">desde el ${esc(fechaCorta(inicio))}</span></div>
+      <div class="mapa-anual" data-mapa>${celdas}</div>
+      <div class="leyenda pequeno muted"><span><i class="n0"></i>Nada</span><span><i class="n2"></i>Algo</span><span><i class="n4"></i>Todo</span></div></section>
+    <section class="tarjeta col"><h2>Semana</h2>
+      ${esta.total || anterior.total ? `${fila("Esta semana", `${esta.hechos} de ${esta.total}`)}${fila("La anterior", anterior.total ? `${anterior.hechos} de ${anterior.total}` : "sin datos")}` : vacio}
+      <p class="muted pequeno">Hábitos hechos (o en versión mínima) de los que tocaban.</p></section>
+    <section class="tarjeta col"><h2>Cada hábito · últimas 4 semanas</h2>${continuidad || vacio}</section>
+    <section class="tarjeta col"><h2>${MESES[aFecha(f).getMonth()].replace(/^./, (x) => x.toUpperCase())}</h2>
+      ${fila("Días con meditación", diasMeditacion)}${fila("Días con diario", diasDiario)}
+      ${fila("Gimnasio", gym.length ? `${gym.length} ${gym.length === 1 ? "vez" : "veces"}${media ? ` · ${minutosTexto(media)} de media` : ""}` : "0")}
+      ${fila("Lectura acumulada", minLectura ? minutosTexto(minLectura) : "0")}</section>
+    <section class="tarjeta col"><h2>Tardes de esta semana</h2>
+      ${hayTardes ? `${fila("Arrancadas", tardes.arrancadas)}${fila("Descanso elegido", tardes.descanso)}${fila("Sin decidir", tardes.sinDecidir)}${tardes.media != null ? fila("Hasta arrancar", minutosTexto(tardes.media)) : ""}` : '<p class="muted pequeno">Aparecen cuando el atajo de llegar a casa esté puesto.</p>'}</section>
+    <section class="tarjeta col"><div class="fila entre"><h2>Ganas por semana</h2><a class="enlace" href="#/espacio/ganas">Ver más</a></div>
+      ${hayGanas ? `<div class="barras">${ganas.map((s) => `<div class="b aviso"><span style="height:${Math.round(100 * s.n / maxG)}%"></span><small>${s.ini.slice(8)}/${s.ini.slice(5, 7)}</small></div>`).join("")}</div>` : vacio}</section>
+    <section class="tarjeta col"><div class="fila entre"><h2>Dinero este mes</h2><a class="enlace" href="#/espacio/finanzas">Ver más</a></div>
+      ${gastosMes.length || ingresosMes.length ? `${fila("Gastos", euros(suma(gastosMes)))}${fila("Caprichos", euros(suma(gastosMes.filter((m) => m.etiqueta === "capricho"))))}${fila("Comida basura y dulces", euros(suma(gastosMes.filter((m) => m.etiqueta === "basura"))))}${ingresosMes.length ? fila("Ingresos", euros(suma(ingresosMes))) : ""}` : '<p class="muted pequeno">Con el banco conectado (fase 2) aparece solo. Ahora, lo que apuntes a mano.</p>'}</section>
+  </div>`;
+    const mapa2 = el2.querySelector("[data-mapa]");
+    if (mapa2) mapa2.scrollLeft = Math.max(0, semanaActual * 15 - mapa2.clientWidth / 2);
   }
 
   // ../365/js/vistas/entrada.js
@@ -4238,7 +4745,7 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
   function pintarTabs(tab) {
     tabs.innerHTML = TABS.map(([k, t]) => `<a href="#/${k}" class="${k === tab ? "activa" : ""}"${k === tab ? ' aria-current="page"' : ""}>${icono(k)}<span>${t}</span></a>`).join("");
   }
-  function pintar8() {
+  function pintar9() {
     const r = ruta();
     const vista = RUTAS[r.tab] || hoy_exports;
     const misma = location.hash === rutaActual;
@@ -4259,7 +4766,7 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
     if (!enMarcha || app.vistaEstable || hayHoja() || document.querySelector(".temporizador")) return;
     const a = document.activeElement;
     if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return;
-    pintar8();
+    pintar9();
   }, 120);
   function actualizarSync() {
     const t = textoSync();
@@ -4276,7 +4783,7 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
     }
     if (!recuerdaDesbloqueo() && desbloqueado() && Date.now() - app.ocultoDesde > 5 * 6e4) {
       bloquear();
-      pintar8();
+      pintar9();
     }
     revisarTemporizadorPendiente();
     sincronizar();
@@ -4287,7 +4794,7 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
     enMarcha = true;
     if (!location.hash || location.hash === "#") location.replace("#/hoy");
     if (iniciado) {
-      pintar8();
+      pintar9();
       return;
     }
     iniciado = true;
@@ -4304,7 +4811,9 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
       }
     });
     window.addEventListener("hashchange", () => {
-      if (enMarcha) pintar8();
+      if (!enMarcha) return;
+      cerrarHoja(true);
+      pintar9();
     });
     window.addEventListener("hoja-cerrada", refrescar2);
     document.addEventListener("visibilitychange", alCambiarVisibilidad);
@@ -4318,7 +4827,7 @@ Agenda: POST a la última URL con JSON {"tipo":"agenda","lineas":"<inicio>|<fin>
     setInterval(() => {
       if (!document.hidden) refrescar2();
     }, 6e4);
-    pintar8();
+    pintar9();
     procesarEntradas();
     revisarTemporizadorPendiente();
     sincronizar();

@@ -1,5 +1,5 @@
 // 365 · service worker: la app abre sin conexión. Los datos no pasan por aquí (van directos a Supabase).
-const VERSION = '365-v1.0.0';
+const VERSION = '365-v1.2.0';
 const BASICOS = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
