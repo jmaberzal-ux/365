@@ -527,7 +527,7 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
   var MODO_PRUEBA = !!otro && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(otro);
   var SUPABASE_URL = MODO_PRUEBA ? otro : URL_POR_DEFECTO;
   var SUPABASE_KEY = MODO_PRUEBA ? leer("365.apikey") || "clave-de-prueba" : CLAVE_POR_DEFECTO;
-  var VERSION = "1.6.0";
+  var VERSION = "1.6.1";
 
   // ../365/js/util.js
   var pad = (n) => String(n).padStart(2, "0");
@@ -2306,7 +2306,7 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
     const desde = sumarDias(hoy(), -3);
     const hechas = new Set(meta("visitasProcesadas") || []);
     let cambio = false;
-    for (const lugar of ["gimnasio", "madre", "trabajo", "casa"]) {
+    for (const lugar of ["gimnasio", "piscina", "madre", "trabajo", "casa"]) {
       if (!habitos.some((h) => h.auto === lugar && h.estado === "activo")) continue;
       for (const v of visitas(fs, lugar)) {
         if (v.fecha < desde) continue;
@@ -3653,6 +3653,15 @@ ${txt}` : txt }));
       pasos: () => [...pasosLugar("llegar", "tu gimnasio", true), `Repite lo mismo con ${B("Salir")} y la dirección de salir.`],
       nota: NOTA_UBICACION,
       hecho: (c) => hay(c.fichajes, (f) => f.lugar === "gimnasio")
+    },
+    {
+      id: "piscina",
+      titulo: "Natación",
+      para: "Cuándo vas a nadar y cuánto rato. Son dos automatizaciones: llegar y salir de la piscina.",
+      urls: [["llegar", "tipo=lugar&lugar=piscina&evento=llegar"], ["salir", "tipo=lugar&lugar=piscina&evento=salir"]],
+      pasos: () => [...pasosLugar("llegar", "la piscina", true), `Repite lo mismo con ${B("Salir")} y la dirección de salir.`],
+      nota: NOTA_UBICACION,
+      hecho: (c) => hay(c.fichajes, (f) => f.lugar === "piscina")
     },
     {
       id: "trabajo",
@@ -5396,7 +5405,7 @@ ${txt}` : txt }));
     const total = cumplimiento(h, c.indice, h.inicio || d28, hasta);
     const fase = h.fase_id ? una2("fases", h.fase_id) : null;
     const pct = c28.pct || 0;
-    const autoTxt = { diario: "al escribir el diario", gimnasio: "al llegar al gimnasio", madre: "al llegar a casa de tu madre", trabajo: "al llegar al trabajo", casa: "al llegar a casa" }[h.auto];
+    const autoTxt = { diario: "al escribir el diario", gimnasio: "al llegar al gimnasio", piscina: "al llegar a la piscina", madre: "al llegar a casa de tu madre", trabajo: "al llegar al trabajo", casa: "al llegar a casa" }[h.auto];
     const dato = (k, v) => v ? `<div class="fila entre"><span class="muted">${k}</span><span>${esc(v)}</span></div>` : "";
     el2.innerHTML = `<div class="pantalla">
     <a class="enlace" href="#/habitos">${icono("atras")} Hábitos</a>
@@ -5559,6 +5568,8 @@ ${txt}` : txt }));
     const trabajo = porSemana(estancias(c.fichajes, "trabajo"), f);
     const gimnasio = porSemana(estancias(c.fichajes, "gimnasio"), f);
     const madre = porSemana(estancias(c.fichajes, "madre"), f);
+    const piscina = porSemana(estancias(c.fichajes, "piscina"), f);
+    const nado = visitas(c.fichajes, "piscina").filter((v) => v.fecha.startsWith(mes));
     const eventosRedes = todas2("redes").filter((e) => Number.isFinite(tsMs(e.ts)));
     const redes = Object.keys(APPS).map((app2) => {
       const u = usos(eventosRedes, app2).filter((x) => !x.desistido);
@@ -5581,6 +5592,7 @@ ${txt}` : txt }));
     <section class="tarjeta col"><h2>${MESES[aFecha(f).getMonth()].replace(/^./, (x) => x.toUpperCase())}</h2>
       ${fila("Días con meditación", diasMeditacion)}${fila("Días con diario", diasDiario)}
       ${fila("Gimnasio", gym.length ? `${gym.length} ${gym.length === 1 ? "vez" : "veces"}${media ? ` · ${minutosTexto(media)} de media` : ""}` : "0")}
+      ${fila("Natación", nado.length ? `${nado.length} ${nado.length === 1 ? "vez" : "veces"}` : "0")}
       ${fila("Lectura acumulada", minLectura ? minutosTexto(minLectura) : "0")}</section>
     <section class="tarjeta col"><h2>Tardes de esta semana</h2>
       ${hayTardes ? `${fila("Arrancadas", tardes.arrancadas)}${fila("Descanso elegido", tardes.descanso)}${fila("Sin decidir", tardes.sinDecidir)}${tardes.media != null ? fila("Hasta arrancar", minutosTexto(tardes.media)) : ""}` : '<p class="muted pequeno">Aparecen cuando el atajo de llegar a casa esté puesto.</p>'}</section>
@@ -5593,6 +5605,7 @@ ${txt}` : txt }));
     ${tarjetaSitio("Fuera de casa", fuera, (x) => x.minutos, `Esta semana: ${horas(fueraEsta.minutos)}${fueraEsta.dias ? ` en ${fueraEsta.dias} ${fueraEsta.dias === 1 ? "día" : "días"}, unas ${minutosTexto(Math.round(fueraEsta.minutos / fueraEsta.dias))} al día` : ""}.`, "Aparece con los atajos de salir y llegar a casa.")}
     ${tarjetaSitio("Trabajo", trabajo, (x) => x.minutos, `Esta semana: ${horas(trabajo[trabajo.length - 1].minutos)}. La anterior: ${horas(trabajo[trabajo.length - 2].minutos)}.`, "Aparece con los atajos de llegar y salir del trabajo.")}
     ${tarjetaSitio("Gimnasio", gimnasio, (x) => x.veces, `Esta semana: ${gimnasio[gimnasio.length - 1].veces} ${gimnasio[gimnasio.length - 1].veces === 1 ? "vez" : "veces"}${gimnasio[gimnasio.length - 1].minutos ? `, ${minutosTexto(gimnasio[gimnasio.length - 1].minutos)}` : ""}.`, "Aparece con los atajos del gimnasio.", '<a class="enlace" href="#/espacio/gimnasio">Ver más</a>')}
+    ${tarjetaSitio("Natación", piscina, (x) => x.veces, `Esta semana: ${piscina[piscina.length - 1].veces} ${piscina[piscina.length - 1].veces === 1 ? "vez" : "veces"}${piscina[piscina.length - 1].minutos ? `, ${minutosTexto(piscina[piscina.length - 1].minutos)}` : ""}.`, "Aparece con los atajos de la piscina.")}
     ${tarjetaSitio("Visitas a tu madre", madre, (x) => x.veces, `Esta semana: ${madre[madre.length - 1].veces} ${madre[madre.length - 1].veces === 1 ? "visita" : "visitas"}. Solo el dato, sin objetivo.`, "Aparece con el atajo de llegar a casa de tu madre.", '<a class="enlace" href="#/espacio/familia">Ver más</a>')}
     <section class="tarjeta col"><div class="fila entre"><h2>Dinero este mes</h2><a class="enlace" href="#/espacio/finanzas">Ver más</a></div>
       ${resumen.total || ingresosMes.length ? `${fila("Gastos", euros(resumen.total))}${fila("Caprichos", euros(resumen.porEtiqueta.capricho))}${fila("Basura o dulces", euros(resumen.porEtiqueta.basura))}${ingresosMes.length ? fila("Ingresos", euros(suma(ingresosMes))) : ""}
