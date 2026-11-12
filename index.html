@@ -527,7 +527,7 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
   var MODO_PRUEBA = !!otro && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(otro);
   var SUPABASE_URL = MODO_PRUEBA ? otro : URL_POR_DEFECTO;
   var SUPABASE_KEY = MODO_PRUEBA ? leer("365.apikey") || "clave-de-prueba" : CLAVE_POR_DEFECTO;
-  var VERSION = "1.5.0";
+  var VERSION = "1.6.0";
 
   // ../365/js/util.js
   var pad = (n) => String(n).padStart(2, "0");
@@ -1188,8 +1188,8 @@ ol.pasos li::marker { font-weight: 700; color: var(--accent); }
     if (n <= 365) return `Día ${n} de 365`;
     return `Día ${n} · ya pasaste los 365`;
   }
-  function proximoEvento(eventos, ahoraMs, horas = 36) {
-    const lim = ahoraMs + horas * 36e5;
+  function proximoEvento(eventos, ahoraMs, horas2 = 36) {
+    const lim = ahoraMs + horas2 * 36e5;
     return eventos.filter((e) => !e.deleted && !e.todo_el_dia && tsMs(e.inicio) >= ahoraMs - 5 * 6e4 && tsMs(e.inicio) <= lim).sort((a, b) => tsMs(a.inicio) - tsMs(b.inicio))[0] || null;
   }
   function estadoTarde({ fichajes, registros, dias, fecha, ahoraMs, umbralMs = 40 * 6e4, activo = true }) {
@@ -5450,8 +5450,56 @@ ${txt}` : txt }));
   __export(evolucion_exports, {
     pintar: () => pintar8
   });
+
+  // ../365/js/semanas.js
+  function fueraDeCasa(fichajes) {
+    const fs = (fichajes || []).filter((f) => f && !f.deleted && f.lugar === "casa").sort((a, b) => tsMs(a.ts) - tsMs(b.ts));
+    const out = [];
+    let salida = null;
+    for (const f of fs) {
+      if (f.evento === "salir") salida = f;
+      else if (f.evento === "llegar" && salida) {
+        const min = Math.round((tsMs(f.ts) - tsMs(salida.ts)) / 6e4);
+        if (min > 0 && min <= 24 * 60) out.push({ fecha: fechaDeTs(salida.ts), minutos: min });
+        salida = null;
+      }
+    }
+    return out;
+  }
+  var estancias = (fichajes, lugar) => visitas(fichajes || [], lugar).map((v) => ({ fecha: v.fecha, minutos: v.minutos }));
+  function porSemana(items, hoyF, n = 8) {
+    const l0 = lunesDe(hoyF);
+    const semanas = Array.from({ length: n }, (_, i) => ({ ini: sumarDias(l0, -7 * (n - 1 - i)), minutos: 0, veces: 0, dias: /* @__PURE__ */ new Set() }));
+    for (const it of items || []) {
+      if (!it || !it.fecha) continue;
+      const s = semanas.find((x) => x.ini === lunesDe(it.fecha));
+      if (!s) continue;
+      s.veces += 1;
+      s.minutos += Number(it.minutos) || 0;
+      s.dias.add(it.fecha);
+    }
+    return semanas.map((s) => ({ ini: s.ini, minutos: s.minutos, veces: s.veces, dias: s.dias.size }));
+  }
+  function diasSinEstaSemana(fechasConUso, hoyF) {
+    const l0 = lunesDe(hoyF);
+    let van = 0;
+    let sin = 0;
+    for (let x = l0; x <= hoyF; x = sumarDias(x, 1)) {
+      van++;
+      if (!fechasConUso.has(x)) sin++;
+    }
+    return { van, sin };
+  }
+
+  // ../365/js/vistas/evolucion.js
   var vacio = '<p class="muted pequeno">Aún no hay datos.</p>';
   var fila = (k, v) => `<div class="fila entre"><span>${k}</span><b>${v}</b></div>`;
+  function barras(sem, valor, clase = "") {
+    const max = Math.max(1, ...sem.map(valor));
+    return `<div class="barras">${sem.map((s) => `<div class="b ${clase}"><span style="height:${Math.round(100 * valor(s) / max)}%"></span><small>${s.ini.slice(8)}/${s.ini.slice(5, 7)}</small></div>`).join("")}</div>`;
+  }
+  var horas = (min) => min ? minutosTexto(min) : "0";
+  var hayAlgo = (sem, valor) => sem.some((x) => valor(x) > 0);
   function semana(c, ini, fin) {
     let total = 0;
     let hechos = 0;
@@ -5506,6 +5554,21 @@ ${txt}` : txt }));
     const gastosMes = c.movimientos.filter((m) => String(m.fecha).startsWith(mes) && Number(m.importe) < 0);
     const suma = (lst) => lst.reduce((a, m) => a + Math.abs(Number(m.importe) || 0), 0);
     const ingresosMes = c.movimientos.filter((m) => String(m.fecha).startsWith(mes) && Number(m.importe) > 0);
+    const resumen = resumenMes(c.movimientos, ajustes(), mes, catalogo2());
+    const fuera = porSemana(fueraDeCasa(c.fichajes), f);
+    const trabajo = porSemana(estancias(c.fichajes, "trabajo"), f);
+    const gimnasio = porSemana(estancias(c.fichajes, "gimnasio"), f);
+    const madre = porSemana(estancias(c.fichajes, "madre"), f);
+    const eventosRedes = todas2("redes").filter((e) => Number.isFinite(tsMs(e.ts)));
+    const redes = Object.keys(APPS).map((app2) => {
+      const u = usos(eventosRedes, app2).filter((x) => !x.desistido);
+      const cfg = (ajustes().redes || {})[app2] || {};
+      return { app: app2, nombre: APPS[app2], cfg, u, sem: porSemana(u, f), estaSemana: diasSinEstaSemana(new Set(u.map((x) => x.fecha)), f), reto: reto(cfg, eventosRedes, app2, f) };
+    });
+    const motivos = motivosDe(redes.flatMap((r) => r.u)).slice(0, 3);
+    const fueraEsta = fuera[fuera.length - 1];
+    const tarjetaSitio = (titulo, sem, valor, resumenTxt, vacioTxt, enlace = "") => `<section class="tarjeta col"><div class="fila entre"><h2>${titulo}</h2>${enlace}</div>
+      ${hayAlgo(sem, valor) ? `${barras(sem, valor)}<p class="muted pequeno">${resumenTxt}</p>` : `<p class="muted pequeno">${vacioTxt}</p>`}</section>`;
     el2.innerHTML = `<div class="pantalla">
     <header class="cabecera"><h1>Evolución</h1><p class="muted">Solo lo que ha pasado de verdad. Un día sin hacer no borra nada.</p></header>
     <section class="tarjeta col"><div class="fila entre"><h2>Tu año</h2><span class="muted pequeno">desde el ${esc(fechaCorta(inicio))}</span></div>
@@ -5523,8 +5586,17 @@ ${txt}` : txt }));
       ${hayTardes ? `${fila("Arrancadas", tardes.arrancadas)}${fila("Descanso elegido", tardes.descanso)}${fila("Sin decidir", tardes.sinDecidir)}${tardes.media != null ? fila("Hasta arrancar", minutosTexto(tardes.media)) : ""}` : '<p class="muted pequeno">Aparecen cuando el atajo de llegar a casa esté puesto.</p>'}</section>
     <section class="tarjeta col"><div class="fila entre"><h2>Ganas por semana</h2><a class="enlace" href="#/espacio/ganas">Ver más</a></div>
       ${hayGanas ? `<div class="barras">${ganas.map((s) => `<div class="b aviso"><span style="height:${Math.round(100 * s.n / maxG)}%"></span><small>${s.ini.slice(8)}/${s.ini.slice(5, 7)}</small></div>`).join("")}</div>` : vacio}</section>
+    <section class="tarjeta col"><div class="fila entre"><h2>Redes</h2><a class="enlace" href="#/espacio/redes">Ver más</a></div>
+      ${redes.map((r) => fila(esc(r.nombre), r.reto.activo ? `${r.reto.diasSin} de ${r.reto.dia} días sin abrirla` : `esta semana, ${r.estaSemana.sin} de ${r.estaSemana.van} días sin abrirla`)).join("")}
+      ${hayAlgo(redes[1].sem, (x) => x.minutos) ? `<span class="etiqueta">Minutos en YouTube por semana</span>${barras(redes[1].sem, (x) => x.minutos, "aviso")}` : ""}
+      ${motivos.length ? `<p class="muted pequeno">Por qué la abres: ${motivos.map(([k, n]) => `${esc(k)} (${n})`).join(", ")}</p>` : ""}</section>
+    ${tarjetaSitio("Fuera de casa", fuera, (x) => x.minutos, `Esta semana: ${horas(fueraEsta.minutos)}${fueraEsta.dias ? ` en ${fueraEsta.dias} ${fueraEsta.dias === 1 ? "día" : "días"}, unas ${minutosTexto(Math.round(fueraEsta.minutos / fueraEsta.dias))} al día` : ""}.`, "Aparece con los atajos de salir y llegar a casa.")}
+    ${tarjetaSitio("Trabajo", trabajo, (x) => x.minutos, `Esta semana: ${horas(trabajo[trabajo.length - 1].minutos)}. La anterior: ${horas(trabajo[trabajo.length - 2].minutos)}.`, "Aparece con los atajos de llegar y salir del trabajo.")}
+    ${tarjetaSitio("Gimnasio", gimnasio, (x) => x.veces, `Esta semana: ${gimnasio[gimnasio.length - 1].veces} ${gimnasio[gimnasio.length - 1].veces === 1 ? "vez" : "veces"}${gimnasio[gimnasio.length - 1].minutos ? `, ${minutosTexto(gimnasio[gimnasio.length - 1].minutos)}` : ""}.`, "Aparece con los atajos del gimnasio.", '<a class="enlace" href="#/espacio/gimnasio">Ver más</a>')}
+    ${tarjetaSitio("Visitas a tu madre", madre, (x) => x.veces, `Esta semana: ${madre[madre.length - 1].veces} ${madre[madre.length - 1].veces === 1 ? "visita" : "visitas"}. Solo el dato, sin objetivo.`, "Aparece con el atajo de llegar a casa de tu madre.", '<a class="enlace" href="#/espacio/familia">Ver más</a>')}
     <section class="tarjeta col"><div class="fila entre"><h2>Dinero este mes</h2><a class="enlace" href="#/espacio/finanzas">Ver más</a></div>
-      ${gastosMes.length || ingresosMes.length ? `${fila("Gastos", euros(suma(gastosMes)))}${fila("Caprichos", euros(suma(gastosMes.filter((m) => m.etiqueta === "capricho"))))}${fila("Comida basura y dulces", euros(suma(gastosMes.filter((m) => m.etiqueta === "basura"))))}${ingresosMes.length ? fila("Ingresos", euros(suma(ingresosMes))) : ""}` : '<p class="muted pequeno">Con el banco conectado (fase 2) aparece solo. Ahora, lo que apuntes a mano.</p>'}</section>
+      ${resumen.total || ingresosMes.length ? `${fila("Gastos", euros(resumen.total))}${fila("Caprichos", euros(resumen.porEtiqueta.capricho))}${fila("Basura o dulces", euros(resumen.porEtiqueta.basura))}${ingresosMes.length ? fila("Ingresos", euros(suma(ingresosMes))) : ""}
+        ${resumen.porCategoria.slice(0, 3).map((x) => fila(`${esc(x.cat.emoji)} ${esc(x.cat.nombre)}`, euros(x.total))).join("")}` : '<p class="muted pequeno">Con el banco conectado aparece solo.</p>'}</section>
   </div>`;
     const mapa2 = el2.querySelector("[data-mapa]");
     if (mapa2) mapa2.scrollLeft = Math.max(0, semanaActual * 15 - mapa2.clientWidth / 2);
